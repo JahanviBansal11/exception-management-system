@@ -26,4 +26,19 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+  // shadcn/ui components intentionally co-export variants + hooks alongside
+  // components — downgrade the react-refresh rule to a warning for that folder.
+  {
+    files: ['src/components/ui/**/*.{js,jsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  // form.jsx exports both components and hooks (useFormField) — same exception.
+  {
+    files: ['src/components/ui/form.jsx'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

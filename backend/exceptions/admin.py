@@ -5,8 +5,10 @@ from .models import (
     RiskIssue,
     AssetType,
     DataClassification,
-    Exception,
-    AuditLog
+    ExceptionRequest,
+    ExceptionCheckpoint,
+    AuditLog,
+    ReminderLog
 )
 
 
@@ -38,8 +40,8 @@ class DataClassificationAdmin(admin.ModelAdmin):
     list_display = ("level", "weight")
 
 
-@admin.register(Exception)
-class ExceptionAdmin(admin.ModelAdmin):
+@admin.register(ExceptionRequest)
+class ExceptionRequestAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "exception_type",
@@ -65,7 +67,7 @@ class ExceptionAdmin(admin.ModelAdmin):
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):
     list_display = (
-        "exception",
+        "exception_request",
         "action_type",
         "previous_status",
         "new_status",
@@ -73,10 +75,44 @@ class AuditLogAdmin(admin.ModelAdmin):
         "timestamp"
     )
     readonly_fields = (
-        "exception",
+        "exception_request",
         "action_type",
         "previous_status",
         "new_status",
         "performed_by",
         "timestamp"
     )
+
+
+@admin.register(ReminderLog)
+class ReminderLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "exception_request",
+        "sent_to",
+        "reminder_type",
+        "delivery_status",
+        "sent_at"
+    )
+    readonly_fields = (
+        "exception_request",
+        "sent_to",
+        "reminder_type",
+        "sent_at",
+        "delivery_status"
+    )
+    list_filter = ("delivery_status", "reminder_type", "sent_at")
+    ordering = ("-sent_at",)
+
+
+@admin.register(ExceptionCheckpoint)
+class ExceptionCheckpointAdmin(admin.ModelAdmin):
+    list_display = (
+        "exception_request",
+        "checkpoint",
+        "status",
+        "completed_by",
+        "completed_at",
+    )
+    list_filter = ("checkpoint", "status", "completed_at")
+    search_fields = ("exception_request__id", "notes")
+    readonly_fields = ("completed_at",)

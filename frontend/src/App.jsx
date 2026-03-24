@@ -1,72 +1,101 @@
-// import { useState } from 'react'
-// import reactLogo from './assets/react.svg'
-// import viteLogo from '/vite.svg'
-// import './App.css'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import './App.css'
+import { useAuth } from './useAuth.js'
+import LoginPage from './LoginPage.jsx'
+import DashboardPage from './DashboardPage.jsx'
+import CreateExceptionPage from './CreateExceptionPage.jsx'
 
-// function App() {
-//   const [count, setCount] = useState(0)
+function getDashboardViewForUser(user) {
+  const groups = user?.groups || []
 
-//   return (
-//     <>
-//       <div>
-//         <a href="https://vite.dev" target="_blank">
-//           <img src={viteLogo} className="logo" alt="Vite logo" />
-//         </a>
-//         <a href="https://react.dev" target="_blank">
-//           <img src={reactLogo} className="logo react" alt="React logo" />
-//         </a>
-//       </div>
-//       <h1>Vite + React</h1>
-//       <div className="card">
-//         <button onClick={() => setCount((count) => count + 1)}>
-//           count is {count}
-//         </button>
-//         <p>
-//           Edit <code>src/App.jsx</code> and save to test HMR
-//         </p>
-//       </div>
-//       <p className="read-the-docs">
-//         Click on the Vite and React logos to learn more
-//       </p>
-//     </>
-//   )
-// }
+  if (groups.includes('Security')) return 'security'
+  if (groups.includes('Approver')) return 'approver'
+  if (groups.includes('RiskOwner')) return 'risk-owner'
+  if (groups.includes('Requestor')) return 'requestor'
 
-// export default App
+  return 'requestor'
+}
 
+function getDashboardPathForUser(user) {
+  return `/dashboard/${getDashboardViewForUser(user)}`
+}
 
-////===================================================
-////connection test code
-import { useEffect, useState } from 'react'
-import axios from 'axios'
+function ProtectedRoute({ children }) {
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return <div className="centered">Loading...</div>
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />
+  }
+
+  return children
+}
+
+function RoleLanding() {
+  const { user, loading } = useAuth()
+  const location = useLocation()
+
+  if (loading) {
+    return <div className="centered">Loading...</div>
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />
+  }
+
+  return <Navigate to={getDashboardPathForUser(user)} replace state={location.state} />
+}
 
 function App() {
-  const [status, setStatus] = useState("Checking connection...")
-
-  useEffect(() => {
-    // We point Axios to your Django server URL
-    axios.get('http://127.0.0.1:8000/')
-      .then(response => {
-        setStatus("Success! The Frontend is talking to the Backend.")
-      })
-      .catch(error => {
-        setStatus("Connection Failed. Make sure Django is running!")
-        console.error("Error details:", error)
-      })
-  }, [])
-
   return (
-    <div style={{ textAlign: 'center', marginTop: '50px' }}>
-      <h1>GRC Project</h1>
-      <div style={{ 
-        padding: '20px', 
-        border: '1px solid #ccc', 
-        display: 'inline-block',
-        color: status.includes("Success") ? 'green' : 'red' 
-      }}>
-        {status}
-      </div>
-    </div>
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/" element={<RoleLanding />} />
+      <Route
+        path="/dashboard/requestor"
+        element={
+          <ProtectedRoute>
+            <DashboardPage view="requestor" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dashboard/approver"
+        element={
+          <ProtectedRoute>
+            <DashboardPage view="approver" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dashboard/risk-owner"
+        element={
+          <ProtectedRoute>
+            <DashboardPage view="risk-owner" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dashboard/security"
+        element={
+          <ProtectedRoute>
+            <DashboardPage view="security" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/exceptions/new"
+        element={
+          <ProtectedRoute>
+            <CreateExceptionPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   )
 }
 
