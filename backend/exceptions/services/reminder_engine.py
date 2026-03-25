@@ -6,9 +6,8 @@ Called periodically by Celery Beat schedule.
 
 import logging
 from django.utils import timezone
-from datetime import timedelta
 
-from exceptions.models import ExceptionRequest
+from exceptions.models import ExceptionRequest, ReminderLog
 from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,12 @@ class ReminderEngine:
     """
     
     REMINDER_THRESHOLDS = {
+        'Reminder_50': 0.50,
+        'Reminder_75': 0.75,
+        'Reminder_90': 0.90,
+    }
+
+    ACTIVE_EXPIRY_THRESHOLDS = {
         'Reminder_50': 0.50,
         'Reminder_75': 0.75,
         'Reminder_90': 0.90,
@@ -138,16 +143,28 @@ class ReminderEngine:
         
         for exception in active:
             try:
-                # Calculate days remaining
-                days_remaining = (exception.exception_end_date - now).days
-                
-                # Send reminder if less than 7 days remaining
-                if 0 < days_remaining <= 7:
-                    # TODO: Send notification to requester
-                    logger.info(
-                        f"Active exception #{exception.id} will expire in {days_remaining} days"
-                    )
+                active_start = exception.approved_at or exception.created_at
+                total_seconds = (exception.exception_end_date - active_start).total_seconds()
+                if total_seconds <= 0:
+                    continue
+
+                elapsed_seconds = (now - active_start).total_seconds()
+                progress = elapsed_seconds / total_seconds
+
+                reminder_stage = ReminderEngine._get_active_expiry_reminder_stage(exception, progress)
+                if reminder_stage is None:
+                    continue
+
+                success = NotificationService.send_active_exception_expiry_reminder(
+                    exception,
+                    reminder_stage,
+                    progress,
+                )
+                if success:
                     reminders_sent += 1
+                    logger.info(
+                        f"Sent active expiry reminder ({reminder_stage}) for exception #{exception.id}"
+                    )
             
             except Exception as e:
                 logger.error(
@@ -156,3 +173,27 @@ class ReminderEngine:
         
         logger.info(f"Completed evaluation. Found {reminders_sent} exceptions approaching expiry.")
         return reminders_sent
+
+    @staticmethod
+    def _get_active_expiry_reminder_stage(exception: ExceptionRequest, progress: float):
+        """Return active reminder stage (Reminder_50/75/90) if pending and not already sent."""
+        if progress >= 0.90:
+            stage = 'Reminder_90'
+        elif progress >= 0.75:
+            stage = 'Reminder_75'
+        elif progress >= 0.50:
+            stage = 'Reminder_50'
+        else:
+            return None
+
+        marker = f"ACTIVE_EXPIRY:{stage}"
+        already_sent = ReminderLog.objects.filter(
+            exception_request=exception,
+            reminder_type='Expired_Notice',
+            delivery_status='sent',
+            message_content__contains=marker,
+        ).exists()
+
+        if already_sent:
+            return None
+        return stage

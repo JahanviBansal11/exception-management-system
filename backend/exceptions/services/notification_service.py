@@ -324,6 +324,71 @@ class NotificationService:
                 f"Failed to send expiry notification for exception #{exception_request.id}: {str(e)}"
             )
             return False
+
+    @staticmethod
+    def send_active_exception_expiry_reminder(exception_request: ExceptionRequest, reminder_stage: str, progress: float) -> bool:
+        """
+        Notify requester that an approved exception is approaching expiry.
+        """
+        try:
+            requester = exception_request.requested_by
+            if not requester or not requester.email:
+                logger.warning(
+                    f"No requester email for active expiry reminder on exception #{exception_request.id}"
+                )
+                return False
+
+            marker = f"ACTIVE_EXPIRY:{reminder_stage}"
+
+            context = {
+                'exception': exception_request,
+                'requester': requester,
+                'reminder_stage': reminder_stage,
+                'progress_percent': int(progress * 100),
+                'review_link': NotificationService._build_portal_link('requestor', exception_request.id),
+            }
+
+            html_message = NotificationService._render_active_expiry_reminder_template(context)
+            body_with_marker = f"{marker}\n{html_message}"
+
+            from exceptions.tasks import send_email_task
+            send_email_task.delay(
+                subject=f"[REMINDER] Active Exception Progress {reminder_stage}: {exception_request.short_description[:50]}",
+                message=html_message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[requester.email],
+            )
+
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=requester,
+                channel='email',
+                reminder_type='Expired_Notice',
+                delivery_status='sent',
+                message_content=body_with_marker[:1000],
+            )
+
+            logger.info(
+                f"Active expiry reminder ({reminder_stage}) sent to {requester.email} for exception #{exception_request.id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Failed to send active expiry reminder for exception #{exception_request.id}: {str(e)}"
+            )
+
+            requester = getattr(exception_request, 'requested_by', None)
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=requester,
+                channel='email',
+                reminder_type='Expired_Notice',
+                delivery_status='failed',
+                error_message=str(e),
+                message_content=f"ACTIVE_EXPIRY:{reminder_stage}",
+            )
+            return False
     
     @staticmethod
     def _render_approval_reminder_template(context):
@@ -452,6 +517,30 @@ class NotificationService:
         
         <p>Please review the exception details and provide your risk assessment before the deadline.</p>
         <p><a href="{{ review_link }}" style="display: inline-block; padding: 10px 20px; background-color: #dc3545; color: white; text-decoration: none; border-radius: 4px;">Assess Risk</a></p>
+        """
+        from django.template import Template, Context
+        t = Template(template)
+        return t.render(Context(context))
+
+    @staticmethod
+    def _render_active_expiry_reminder_template(context):
+        """Render active exception expiry reminder email template."""
+        template = """
+        <h2>Active Exception Reminder</h2>
+        <p>Hello {{ requester.first_name }},</p>
+        <p>Your approved exception has reached {{ reminder_stage }} of its allowed active time window.</p>
+
+        <div style="border: 1px solid #ddd; padding: 15px; margin: 20px 0; background-color: #fff7ed;">
+            <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
+            <p><strong>Description:</strong> {{ exception.short_description }}</p>
+            <p><strong>Current Status:</strong> {{ exception.status }}</p>
+            <p><strong>Elapsed Window:</strong> {{ progress_percent }}%</p>
+            <p><strong>Reminder Stage:</strong> {{ reminder_stage }}</p>
+            <p><strong>End Date:</strong> {{ exception.exception_end_date|date:"M d, Y H:i" }}</p>
+        </div>
+
+        <p>Please plan remediation or extension actions before expiry.</p>
+        <p><a href="{{ review_link }}" style="display: inline-block; padding: 10px 20px; background-color: #f97316; color: white; text-decoration: none; border-radius: 4px;">Open Exception</a></p>
         """
         from django.template import Template, Context
         t = Template(template)

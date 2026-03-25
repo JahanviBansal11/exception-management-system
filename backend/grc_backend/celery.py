@@ -37,6 +37,11 @@ app.conf.beat_schedule = {
         'task': 'exceptions.tasks.escalate_expired_approvals',
         'schedule': crontab(minute=0),  # Every hour
     },
+    # Close approved exceptions once validity window ends
+    'close-expired-exceptions': {
+        'task': 'exceptions.tasks.close_expired_exceptions',
+        'schedule': crontab(minute=0),  # Every hour
+    },
 }
 
 # ============================================

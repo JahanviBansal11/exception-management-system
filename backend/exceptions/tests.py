@@ -29,10 +29,14 @@ class OptionBWorkflowTests(TestCase):
         cls.outsider = User.objects.create_user('test_outsider', 'out@test.com', 'pass123')
         User.objects.get_or_create(username='system', defaults={'email': 'system@test.com'})
 
-        Group.objects.get_or_create(name='Requestor')
-        Group.objects.get_or_create(name='Approver')
-        Group.objects.get_or_create(name='Risk Owner')
+        requestor_group, _ = Group.objects.get_or_create(name='Requestor')
+        approver_group, _ = Group.objects.get_or_create(name='Approver')
+        risk_owner_group, _ = Group.objects.get_or_create(name='Risk Owner')
         Group.objects.get_or_create(name='Security')
+
+        cls.requestor.groups.add(requestor_group)
+        cls.approver.groups.add(approver_group)
+        cls.risk_owner.groups.add(risk_owner_group)
 
         cls.bu, _ = BusinessUnit.objects.get_or_create(
             bu_code='FIN',

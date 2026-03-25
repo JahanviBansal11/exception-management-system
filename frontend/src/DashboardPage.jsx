@@ -26,6 +26,13 @@ const SORT_OPTIONS = [
   { value: 'deadline_latest', label: 'Deadline latest' },
 ]
 
+const KPI_CONFIG = [
+  { key: 'my_queue_total', label: 'My Queue' },
+  { key: 'pending_action', label: 'Pending Action' },
+  { key: 'overdue_approval', label: 'Overdue Approval' },
+  { key: 'approved', label: 'Approved' },
+]
+
 function statusTone(status) {
   const tones = {
     Draft: 'muted',
@@ -60,6 +67,15 @@ function formatDateTimeWithSeconds(value) {
   return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear()).slice(-2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
 }
 
+function toDateTimeLocalValue(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const timezoneOffset = date.getTimezoneOffset() * 60000
+  const localDate = new Date(date.getTime() - timezoneOffset)
+  return localDate.toISOString().slice(0, 16)
+}
+
 function getRequestedPeriodDays(item) {
   if (!item?.created_at || !item?.exception_end_date) return null
   const created = new Date(item.created_at)
@@ -89,6 +105,28 @@ function sortExceptions(items, sortKey) {
     sorted.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
   }
   return sorted
+}
+
+function matchesKpi(item, kpiKey) {
+  if (!kpiKey) return true
+  if (kpiKey === 'my_queue_total') return true
+  if (kpiKey === 'pending_action') return ['Submitted', 'AwaitingRiskOwner'].includes(item.status)
+  if (kpiKey === 'overdue_approval') {
+    if (!['Submitted', 'AwaitingRiskOwner'].includes(item.status)) return false
+    if (!item.approval_deadline) return false
+    const deadline = new Date(item.approval_deadline)
+    if (Number.isNaN(deadline.getTime())) return false
+    return deadline.getTime() < Date.now()
+  }
+  if (kpiKey === 'approved') return item.status === 'Approved'
+  return true
+}
+
+function reachedRiskOwnerStage(item) {
+  if (!item) return false
+  const checkpoints = item.checkpoints || []
+  const riskNotifiedCheckpoint = checkpoints.find((checkpoint) => checkpoint.checkpoint === 'risk_assessment_notified')
+  return ['pending', 'completed', 'escalated'].includes(riskNotifiedCheckpoint?.status)
 }
 
 function canAct(user, exception, actionKey) {
@@ -125,7 +163,14 @@ function matchesView(item, view, userId) {
   if (view === 'security') return true
   if (view === 'requestor') return item.requested_by === userId
   if (view === 'approver') return item.assigned_approver === userId
-  if (view === 'risk-owner') return item.risk_owner === userId
+  if (view === 'risk-owner') {
+    if (item.risk_owner !== userId) return false
+    if (item.status === 'AwaitingRiskOwner') return true
+    if (['Approved', 'Rejected', 'Expired', 'Closed'].includes(item.status)) {
+      return reachedRiskOwnerStage(item)
+    }
+    return false
+  }
 
   return false
 }
@@ -143,21 +188,38 @@ function DashboardPage({ view }) {
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [loadingNotifications, setLoadingNotifications] = useState(false)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [actionError, setActionError] = useState('')
   const [summary, setSummary] = useState(null)
   const [notifications, setNotifications] = useState([])
   const [requesterPopup, setRequesterPopup] = useState(null)
   const [sortKey, setSortKey] = useState('newest')
+  const [selectedStatusFilters, setSelectedStatusFilters] = useState([])
+  const [selectedRiskFilters, setSelectedRiskFilters] = useState([])
+  const [sortMenuOpen, setSortMenuOpen] = useState(false)
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false)
+  const [statusFilterEnabled, setStatusFilterEnabled] = useState(false)
+  const [riskFilterEnabled, setRiskFilterEnabled] = useState(false)
+  const [activeKpi, setActiveKpi] = useState('')
   const [actionNotes, setActionNotes] = useState('')
+  const [endDateInput, setEndDateInput] = useState('')
+  const [endDateNotes, setEndDateNotes] = useState('')
+  const [endDateUpdateError, setEndDateUpdateError] = useState('')
+  const [updatingEndDate, setUpdatingEndDate] = useState(false)
   const [adminUsers, setAdminUsers] = useState([])
   const [adminRoles, setAdminRoles] = useState([])
   const [loadingAdminUsers, setLoadingAdminUsers] = useState(false)
   const [adminError, setAdminError] = useState('')
+  const [adminSearch, setAdminSearch] = useState('')
+  const [adminRoleFilter, setAdminRoleFilter] = useState('all')
+  const [adminStatusFilter, setAdminStatusFilter] = useState('all')
+  const [adminSortKey, setAdminSortKey] = useState('username_asc')
+  const [activeAdminSection, setActiveAdminSection] = useState('')
+  const [adminPageSize, setAdminPageSize] = useState(25)
+  const [adminPage, setAdminPage] = useState(1)
   const [newUserForm, setNewUserForm] = useState({
     username: '',
     password: '',
-    first_name: '',
-    last_name: '',
     email: '',
     is_active: true,
     role: 'Requestor',
@@ -274,12 +336,63 @@ function DashboardPage({ view }) {
     loadExceptionDetail(selectedId)
   }, [selectedId, loadExceptionDetail])
 
+  useEffect(() => {
+    if (!selected) {
+      setEndDateInput('')
+      setEndDateNotes('')
+      setEndDateUpdateError('')
+      return
+    }
+    setEndDateInput(toDateTimeLocalValue(selected.exception_end_date))
+    setEndDateNotes('')
+    setEndDateUpdateError('')
+  }, [selected])
+
   const availableActions = useMemo(() => {
     if (!selected || !user) return []
     return Object.entries(ACTION_CONFIG).filter(([key]) => canAct(user, selected, key))
   }, [selected, user])
 
   const sortedItems = useMemo(() => sortExceptions(items, sortKey), [items, sortKey])
+
+  const statusOptions = useMemo(() => {
+    const statuses = Array.from(new Set(items.map((item) => item.status).filter(Boolean)))
+    return statuses.sort((a, b) => a.localeCompare(b))
+  }, [items])
+
+  const riskOptions = useMemo(() => {
+    const ratings = Array.from(new Set(items.map((item) => item.risk_rating).filter(Boolean)))
+    return ratings.sort((a, b) => a.localeCompare(b))
+  }, [items])
+
+  const canUseRiskFilter = ['approver', 'security'].includes(view)
+  const effectiveStatusFilters = statusFilterEnabled ? selectedStatusFilters : []
+  const effectiveRiskFilters = riskFilterEnabled && canUseRiskFilter ? selectedRiskFilters : []
+
+  const listItems = useMemo(() => {
+    return sortedItems.filter((item) => {
+      if (effectiveStatusFilters.length > 0 && !effectiveStatusFilters.includes(item.status)) return false
+      if (effectiveRiskFilters.length > 0 && !effectiveRiskFilters.includes(item.risk_rating)) return false
+      if (!matchesKpi(item, activeKpi)) return false
+      return true
+    })
+  }, [sortedItems, effectiveStatusFilters, effectiveRiskFilters, activeKpi])
+
+  function toggleStatusFilter(value) {
+    setSelectedStatusFilters((current) => (
+      current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value]
+    ))
+  }
+
+  function toggleRiskFilter(value) {
+    setSelectedRiskFilters((current) => (
+      current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value]
+    ))
+  }
 
   async function runAction(actionKey) {
     if (!selected) return
@@ -326,6 +439,47 @@ function DashboardPage({ view }) {
     }
   }
 
+  async function updateExceptionEndDate() {
+    if (!selected) return
+    setEndDateUpdateError('')
+
+    if (!endDateInput) {
+      setEndDateUpdateError('Please select a new end date.')
+      return
+    }
+    if (!endDateNotes.trim()) {
+      setEndDateUpdateError('Please provide notes for this end date update.')
+      return
+    }
+
+    setUpdatingEndDate(true)
+    try {
+      const isoEndDate = new Date(endDateInput).toISOString()
+      await api.post(`/api/exceptions/${selected.id}/update_end_date/`, {
+        exception_end_date: isoEndDate,
+        notes: endDateNotes.trim(),
+      })
+
+      await loadExceptions()
+      await loadExceptionDetail(selected.id)
+      await loadSummary()
+      await loadNotifications()
+      setEndDateNotes('')
+    } catch (error) {
+      const detail = error?.response?.data
+      if (typeof detail?.detail === 'string') {
+        setEndDateUpdateError(detail.detail)
+      } else if (detail && typeof detail === 'object') {
+        const first = Object.values(detail)[0]
+        setEndDateUpdateError(Array.isArray(first) ? String(first[0]) : String(first))
+      } else {
+        setEndDateUpdateError('Failed to update end date.')
+      }
+    } finally {
+      setUpdatingEndDate(false)
+    }
+  }
+
   async function createManagedUser(event) {
     event.preventDefault()
     setAdminError('')
@@ -333,8 +487,6 @@ function DashboardPage({ view }) {
       await api.post('/api/security/users/', {
         username: newUserForm.username,
         password: newUserForm.password,
-        first_name: newUserForm.first_name,
-        last_name: newUserForm.last_name,
         email: newUserForm.email,
         is_active: newUserForm.is_active,
         roles: [newUserForm.role],
@@ -342,8 +494,6 @@ function DashboardPage({ view }) {
       setNewUserForm({
         username: '',
         password: '',
-        first_name: '',
-        last_name: '',
         email: '',
         is_active: true,
         role: adminRoles[0] || 'Requestor',
@@ -380,8 +530,66 @@ function DashboardPage({ view }) {
     setAdminUsers((current) => current.map((entry) => (entry.id === userId ? { ...entry, ...updates } : entry)))
   }
 
+  const filteredAdminUsers = useMemo(() => {
+    let list = [...adminUsers]
+
+    if (adminSearch.trim()) {
+      const keyword = adminSearch.trim().toLowerCase()
+      list = list.filter((entry) => {
+        const roleText = (entry.roles || []).join(' ').toLowerCase()
+        return (
+          String(entry.username || '').toLowerCase().includes(keyword) ||
+          String(entry.email || '').toLowerCase().includes(keyword) ||
+          roleText.includes(keyword)
+        )
+      })
+    }
+
+    if (adminRoleFilter !== 'all') {
+      list = list.filter((entry) => (entry.roles || []).includes(adminRoleFilter))
+    }
+
+    if (adminStatusFilter !== 'all') {
+      const onlyActive = adminStatusFilter === 'active'
+      list = list.filter((entry) => Boolean(entry.is_active) === onlyActive)
+    }
+
+    if (adminSortKey === 'username_desc') {
+      list.sort((a, b) => String(b.username || '').localeCompare(String(a.username || '')))
+    } else if (adminSortKey === 'role_asc') {
+      list.sort((a, b) => String((a.roles && a.roles[0]) || '').localeCompare(String((b.roles && b.roles[0]) || '')))
+    } else if (adminSortKey === 'active_first') {
+      list.sort((a, b) => Number(Boolean(b.is_active)) - Number(Boolean(a.is_active)))
+    } else if (adminSortKey === 'inactive_first') {
+      list.sort((a, b) => Number(Boolean(a.is_active)) - Number(Boolean(b.is_active)))
+    } else {
+      list.sort((a, b) => String(a.username || '').localeCompare(String(b.username || '')))
+    }
+
+    return list
+  }, [adminUsers, adminSearch, adminRoleFilter, adminStatusFilter, adminSortKey])
+
+  const totalAdminPages = Math.max(1, Math.ceil(filteredAdminUsers.length / adminPageSize))
+
+  useEffect(() => {
+    setAdminPage(1)
+  }, [adminSearch, adminRoleFilter, adminStatusFilter, adminSortKey, adminPageSize])
+
+  useEffect(() => {
+    if (adminPage > totalAdminPages) {
+      setAdminPage(totalAdminPages)
+    }
+  }, [adminPage, totalAdminPages])
+
+  const pagedAdminUsers = useMemo(() => {
+    const start = (adminPage - 1) * adminPageSize
+    return filteredAdminUsers.slice(start, start + adminPageSize)
+  }, [filteredAdminUsers, adminPage, adminPageSize])
+
   const title = DASHBOARD_TITLES[view] || 'Exception Management Dashboard'
   const canCreateException = view === 'requestor' || view === 'security'
+  const notificationBadgeCount = notifications.length
+  const canUpdateEndDate = ['approver', 'risk-owner', 'security'].includes(view)
 
   return (
     <div className="shell">
@@ -453,62 +661,19 @@ function DashboardPage({ view }) {
 
       {summary ? (
         <div className="summary-grid">
-          <div className="summary-card">
-            <div className="summary-label">My Queue</div>
-            <div className="summary-value">{summary.my_queue_total}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Pending Action</div>
-            <div className="summary-value">{summary.pending_action}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Overdue Approval</div>
-            <div className="summary-value">{summary.overdue_approval}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Approved</div>
-            <div className="summary-value">{summary.approved}</div>
-          </div>
-        </div>
-      ) : null}
-
-      <section className="panel" style={{ marginBottom: '20px' }}>
-        <div className="panel-header">
-          <h3>Notification Center</h3>
-          <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={loadNotifications}>
-            Refresh
-          </button>
-        </div>
-
-        {loadingNotifications ? <div className="meta">Loading notifications...</div> : null}
-
-        {!loadingNotifications && notifications.length === 0 ? (
-          <div className="meta">No notifications right now.</div>
-        ) : null}
-
-        <div className="notification-list">
-          {notifications.map((item, index) => (
+          {KPI_CONFIG.map((kpi) => (
             <button
-              key={`${item.event_type}-${item.exception_id || 'na'}-${item.timestamp || index}`}
+              key={kpi.key}
               type="button"
-              className="notification-item"
-              onClick={() => {
-                if (!item.exception_id) return
-                setSelectedId(item.exception_id)
-              }}
+              className={`summary-card summary-card-clickable ${activeKpi === kpi.key ? 'summary-card-active' : ''}`}
+              onClick={() => setActiveKpi((current) => (current === kpi.key ? '' : kpi.key))}
             >
-              <div className="list-card-top">
-                <strong>{item.title}</strong>
-                <span className={`badge badge-${item.severity === 'danger' ? 'danger' : item.severity === 'warning' ? 'warning' : 'info'}`}>
-                  {item.severity}
-                </span>
-              </div>
-              <div>{item.message}</div>
-              <div className="meta">{formatDateTime(item.timestamp)}</div>
+              <div className="summary-label">{kpi.label}</div>
+              <div className="summary-value">{summary[kpi.key] ?? 0}</div>
             </button>
           ))}
         </div>
-      </section>
+      ) : null}
 
       {view === 'security' ? (
         <section className="panel" style={{ marginBottom: '20px' }}>
@@ -519,59 +684,128 @@ function DashboardPage({ view }) {
             </button>
           </div>
 
-          <form className="admin-form" onSubmit={createManagedUser}>
-            <input placeholder="Username" value={newUserForm.username} onChange={(e) => setNewUserForm((v) => ({ ...v, username: e.target.value }))} required />
-            <input placeholder="Password" type="password" value={newUserForm.password} onChange={(e) => setNewUserForm((v) => ({ ...v, password: e.target.value }))} required />
-            <input placeholder="First name" value={newUserForm.first_name} onChange={(e) => setNewUserForm((v) => ({ ...v, first_name: e.target.value }))} />
-            <input placeholder="Last name" value={newUserForm.last_name} onChange={(e) => setNewUserForm((v) => ({ ...v, last_name: e.target.value }))} />
-            <input placeholder="Email" type="email" value={newUserForm.email} onChange={(e) => setNewUserForm((v) => ({ ...v, email: e.target.value }))} />
-            <select value={newUserForm.role} onChange={(e) => setNewUserForm((v) => ({ ...v, role: e.target.value }))}>
-              {(adminRoles.length ? adminRoles : ['Requestor', 'Approver', 'RiskOwner', 'Security']).map((role) => (
-                <option key={role} value={role}>{role}</option>
-              ))}
-            </select>
-            <label className="meta" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-              <input type="checkbox" checked={newUserForm.is_active} onChange={(e) => setNewUserForm((v) => ({ ...v, is_active: e.target.checked }))} /> Active
-            </label>
-            <button className="btn" style={{ width: 'auto' }} type="submit">Create User</button>
-          </form>
+          <div className="admin-action-buttons">
+            <button
+              className={`btn ${activeAdminSection === 'create' ? '' : 'btn-secondary'}`}
+              style={{ width: 'auto' }}
+              onClick={() => setActiveAdminSection((current) => (current === 'create' ? '' : 'create'))}
+            >
+              Create User
+            </button>
+            <button
+              className={`btn ${activeAdminSection === 'directory' ? '' : 'btn-secondary'}`}
+              style={{ width: 'auto' }}
+              onClick={() => setActiveAdminSection((current) => (current === 'directory' ? '' : 'directory'))}
+            >
+              User Directory
+            </button>
+          </div>
 
-          {loadingAdminUsers ? <div className="meta">Loading users...</div> : null}
-          {adminError ? <div className="error">{adminError}</div> : null}
-
-          <div className="admin-users-list">
-            {adminUsers.map((managedUser) => (
-              <div className="admin-user-row" key={managedUser.id}>
-                <div><strong>{managedUser.username}</strong></div>
-                <input
-                  type="email"
-                  value={managedUser.email || ''}
-                  onChange={(e) => updateAdminUserLocal(managedUser.id, { email: e.target.value })}
-                  placeholder="Email"
-                />
-                <select
-                  value={(managedUser.roles && managedUser.roles[0]) || ''}
-                  onChange={(e) => updateAdminUserLocal(managedUser.id, { roles: e.target.value ? [e.target.value] : [] })}
-                >
-                  <option value="">No Role</option>
+          {activeAdminSection === 'create' ? (
+            <div className="admin-subsection">
+              <h4>Create User</h4>
+              <form className="admin-form" onSubmit={createManagedUser}>
+                <input placeholder="Username" value={newUserForm.username} onChange={(e) => setNewUserForm((v) => ({ ...v, username: e.target.value }))} required />
+                <input placeholder="Email" type="email" value={newUserForm.email} onChange={(e) => setNewUserForm((v) => ({ ...v, email: e.target.value }))} />
+                <input placeholder="Password" type="password" value={newUserForm.password} onChange={(e) => setNewUserForm((v) => ({ ...v, password: e.target.value }))} required />
+                <select className="scrollable-select" value={newUserForm.role} onChange={(e) => setNewUserForm((v) => ({ ...v, role: e.target.value }))}>
                   {(adminRoles.length ? adminRoles : ['Requestor', 'Approver', 'RiskOwner', 'Security']).map((role) => (
                     <option key={role} value={role}>{role}</option>
                   ))}
                 </select>
                 <label className="meta" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(managedUser.is_active)}
-                    onChange={(e) => updateAdminUserLocal(managedUser.id, { is_active: e.target.checked })}
-                  />
-                  Active
+                  <input type="checkbox" checked={newUserForm.is_active} onChange={(e) => setNewUserForm((v) => ({ ...v, is_active: e.target.checked }))} /> Active
                 </label>
-                <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={() => updateManagedUser(managedUser)}>
-                  Save
-                </button>
+                <div />
+                <div className="admin-create-submit">
+                  <button className="btn" style={{ width: 'auto' }} type="submit">Create User</button>
+                </div>
+              </form>
+            </div>
+          ) : null}
+
+          {activeAdminSection === 'directory' ? (
+            <div className="admin-subsection">
+              <h4>User Directory</h4>
+
+              <div className="admin-toolbar">
+                <input
+                  placeholder="Search username/email/role"
+                  value={adminSearch}
+                  onChange={(event) => setAdminSearch(event.target.value)}
+                />
+                <select className="scrollable-select" value={adminRoleFilter} onChange={(event) => setAdminRoleFilter(event.target.value)}>
+                  <option value="all">All roles</option>
+                  {(adminRoles.length ? adminRoles : ['Requestor', 'Approver', 'RiskOwner', 'Security']).map((role) => (
+                    <option key={role} value={role}>{role}</option>
+                  ))}
+                </select>
+                <select className="scrollable-select" value={adminStatusFilter} onChange={(event) => setAdminStatusFilter(event.target.value)}>
+                  <option value="all">All statuses</option>
+                  <option value="active">Active only</option>
+                  <option value="inactive">Inactive only</option>
+                </select>
+                <select className="scrollable-select" value={adminSortKey} onChange={(event) => setAdminSortKey(event.target.value)}>
+                  <option value="username_asc">Username A→Z</option>
+                  <option value="username_desc">Username Z→A</option>
+                  <option value="role_asc">Role A→Z</option>
+                  <option value="active_first">Active first</option>
+                  <option value="inactive_first">Inactive first</option>
+                </select>
+                <select className="scrollable-select" value={String(adminPageSize)} onChange={(event) => setAdminPageSize(Number(event.target.value) || 25)}>
+                  <option value="10">10 / page</option>
+                  <option value="25">25 / page</option>
+                  <option value="50">50 / page</option>
+                  <option value="100">100 / page</option>
+                </select>
               </div>
-            ))}
-          </div>
+
+              {loadingAdminUsers ? <div className="meta">Loading users...</div> : null}
+              {adminError ? <div className="error">{adminError}</div> : null}
+              {!loadingAdminUsers ? <div className="meta">Showing {filteredAdminUsers.length} users • page {adminPage} of {totalAdminPages}</div> : null}
+
+              <div className="admin-users-list admin-users-list-large">
+                {pagedAdminUsers.map((managedUser) => (
+                  <div className="admin-user-row" key={managedUser.id}>
+                    <div><strong>{managedUser.username}</strong></div>
+                    <input
+                      type="email"
+                      value={managedUser.email || ''}
+                      onChange={(e) => updateAdminUserLocal(managedUser.id, { email: e.target.value })}
+                      placeholder="Email"
+                    />
+                    <select
+                      className="scrollable-select"
+                      value={(managedUser.roles && managedUser.roles[0]) || ''}
+                      onChange={(e) => updateAdminUserLocal(managedUser.id, { roles: e.target.value ? [e.target.value] : [] })}
+                    >
+                      <option value="">No Role</option>
+                      {(adminRoles.length ? adminRoles : ['Requestor', 'Approver', 'RiskOwner', 'Security']).map((role) => (
+                        <option key={role} value={role}>{role}</option>
+                      ))}
+                    </select>
+                    <label className="meta" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(managedUser.is_active)}
+                        onChange={(e) => updateAdminUserLocal(managedUser.id, { is_active: e.target.checked })}
+                      />
+                      Active
+                    </label>
+                    <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={() => updateManagedUser(managedUser)}>
+                      Save
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="admin-pagination">
+                <button className="btn btn-secondary" style={{ width: 'auto' }} disabled={adminPage <= 1} onClick={() => setAdminPage((page) => Math.max(1, page - 1))}>Previous</button>
+                <span className="meta">Page {adminPage} / {totalAdminPages}</span>
+                <button className="btn btn-secondary" style={{ width: 'auto' }} disabled={adminPage >= totalAdminPages} onClick={() => setAdminPage((page) => Math.min(totalAdminPages, page + 1))}>Next</button>
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -579,12 +813,146 @@ function DashboardPage({ view }) {
         <section className="panel">
           <div className="panel-header">
             <h3>Exceptions</h3>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <select value={sortKey} onChange={(event) => setSortKey(event.target.value)}>
-                {SORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
+            <div className="list-controls">
+              <div className="control-menu-wrap">
+                <button
+                  type="button"
+                  className={`control-card ${sortMenuOpen ? 'control-card-active' : ''}`}
+                  onClick={() => {
+                    setSortMenuOpen((open) => !open)
+                    setFilterMenuOpen(false)
+                  }}
+                >
+                  Sort
+                </button>
+                {sortMenuOpen ? (
+                  <div className="control-menu">
+                    <label className="meta">Sort by</label>
+                    <select className="scrollable-select" value={sortKey} onChange={(event) => setSortKey(event.target.value)}>
+                      {SORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: '100%' }}
+                      onClick={() => {
+                        setSortKey('newest')
+                        setSortMenuOpen(false)
+                      }}
+                    >
+                      Reset sorting
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="control-menu-wrap">
+                <button
+                  type="button"
+                  className={`control-card ${filterMenuOpen ? 'control-card-active' : ''}`}
+                  onClick={() => {
+                    setFilterMenuOpen((open) => !open)
+                    setSortMenuOpen(false)
+                  }}
+                >
+                  Filter
+                </button>
+                {filterMenuOpen ? (
+                  <div className="control-menu">
+                    <label className="control-check">
+                      <input
+                        type="checkbox"
+                        checked={statusFilterEnabled}
+                        onChange={(event) => {
+                          const enabled = event.target.checked
+                          setStatusFilterEnabled(enabled)
+                          if (!enabled) setSelectedStatusFilters([])
+                        }}
+                      />
+                      Status
+                    </label>
+                    {statusFilterEnabled ? (
+                      <div className="multi-option-list">
+                        {statusOptions.map((status) => (
+                          <label key={status} className="control-check">
+                            <input
+                              type="checkbox"
+                              checked={selectedStatusFilters.includes(status)}
+                              onChange={() => toggleStatusFilter(status)}
+                            />
+                            {status}
+                          </label>
+                        ))}
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ width: '100%' }}
+                          onClick={() => setSelectedStatusFilters([])}
+                        >
+                          Clear status filters
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {canUseRiskFilter ? (
+                      <>
+                        <label className="control-check">
+                          <input
+                            type="checkbox"
+                            checked={riskFilterEnabled}
+                            onChange={(event) => {
+                              const enabled = event.target.checked
+                              setRiskFilterEnabled(enabled)
+                              if (!enabled) setSelectedRiskFilters([])
+                            }}
+                          />
+                          Risk rating
+                        </label>
+                        {riskFilterEnabled ? (
+                          <div className="multi-option-list">
+                            {riskOptions.map((risk) => (
+                              <label key={risk} className="control-check">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedRiskFilters.includes(risk)}
+                                  onChange={() => toggleRiskFilter(risk)}
+                                />
+                                {risk}
+                              </label>
+                            ))}
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              style={{ width: '100%' }}
+                              onClick={() => setSelectedRiskFilters([])}
+                            >
+                              Clear risk filters
+                            </button>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ width: '100%' }}
+                      onClick={() => {
+                        setStatusFilterEnabled(false)
+                        setRiskFilterEnabled(false)
+                        setSelectedStatusFilters([])
+                        setSelectedRiskFilters([])
+                        setFilterMenuOpen(false)
+                      }}
+                    >
+                      Remove filters
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
               <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={loadExceptions}>
                 Refresh
               </button>
@@ -593,10 +961,16 @@ function DashboardPage({ view }) {
 
           {loadingList ? <div className="meta">Loading exceptions...</div> : null}
 
-          {!loadingList && items.length === 0 ? <div className="meta">No exceptions available for your account.</div> : null}
+          {activeKpi ? (
+            <div className="meta" style={{ marginBottom: '8px' }}>
+              KPI filter active: {KPI_CONFIG.find((kpi) => kpi.key === activeKpi)?.label || activeKpi}
+            </div>
+          ) : null}
+
+          {!loadingList && listItems.length === 0 ? <div className="meta">No exceptions match the selected filters.</div> : null}
 
           <div className="list-stack">
-            {sortedItems.map((item) => (
+            {listItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -648,8 +1022,63 @@ function DashboardPage({ view }) {
                     <div><strong>Approval Deadline:</strong> {formatDateTimeCompact(selected.approval_deadline)}</div>
                   ) : null}
                   <div><strong>Approved On:</strong> {formatDateTime(selected.approved_at)}</div>
-                  <div><strong>Requested End Date:</strong> {formatDateTimeCompact(selected.exception_end_date)}</div>
                   <div><strong>Requested Active Period:</strong> {getRequestedPeriodDays(selected) ?? '—'} day(s)</div>
+                </div>
+              </div>
+
+              <div className="section-block">
+                <strong>Dates</strong>
+                <div className="detail-grid" style={{ marginTop: '8px' }}>
+                  <div><strong>Current End Date:</strong> {formatDateTimeCompact(selected.exception_end_date)}</div>
+                </div>
+
+                {canUpdateEndDate ? (
+                  <div style={{ marginTop: '10px' }}>
+                    <div className="detail-grid">
+                      <div>
+                        <label className="meta">New End Date</label>
+                        <input
+                          type="datetime-local"
+                          value={endDateInput}
+                          onChange={(event) => setEndDateInput(event.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <label className="meta">Notes</label>
+                        <textarea
+                          className="action-notes"
+                          placeholder="Why is the end date changing?"
+                          value={endDateNotes}
+                          onChange={(event) => setEndDateNotes(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ marginTop: '8px' }}>
+                      <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={updateExceptionEndDate} disabled={updatingEndDate}>
+                        {updatingEndDate ? 'Updating...' : 'Update End Date'}
+                      </button>
+                    </div>
+                    {endDateUpdateError ? <div className="error" style={{ marginTop: '8px' }}>{endDateUpdateError}</div> : null}
+                  </div>
+                ) : null}
+
+                <div className="checkpoint-list" style={{ marginTop: '10px' }}>
+                  {(selected.end_date_change_history || []).length === 0 ? (
+                    <div className="meta">No end date changes recorded.</div>
+                  ) : (
+                    (selected.end_date_change_history || []).map((entry, index) => (
+                      <div key={`${entry.timestamp || 'na'}-${index}`} className="checkpoint-item">
+                        <div className="list-card-top">
+                          <span><strong>{entry.performed_by || 'System'}</strong> updated end date</span>
+                          <span className="badge badge-info">change</span>
+                        </div>
+                        <div className="meta">From: {formatDateTimeCompact(entry.previous_end_date)}</div>
+                        <div className="meta">To: {formatDateTimeCompact(entry.new_end_date)}</div>
+                        <div className="meta">When: {formatDateTimeWithSeconds(entry.timestamp)}</div>
+                        {entry.notes ? <div className="meta">Notes: {entry.notes}</div> : null}
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -712,6 +1141,60 @@ function DashboardPage({ view }) {
             </>
           ) : null}
         </section>
+      </div>
+
+      <div className="notification-dock">
+        {notificationsOpen ? (
+          <div className="notification-dock-panel">
+            <div className="panel-header">
+              <h3>Notifications</h3>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={loadNotifications}>
+                  Refresh
+                </button>
+                <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={() => setNotificationsOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+
+            {loadingNotifications ? <div className="meta">Loading notifications...</div> : null}
+            {!loadingNotifications && notifications.length === 0 ? <div className="meta">No notifications right now.</div> : null}
+
+            <div className="notification-list notification-list-scroll">
+              {notifications.map((item, index) => (
+                <button
+                  key={`${item.event_type}-${item.exception_id || 'na'}-${item.timestamp || index}`}
+                  type="button"
+                  className="notification-item"
+                  onClick={() => {
+                    if (item.exception_id) {
+                      setSelectedId(item.exception_id)
+                    }
+                    setNotificationsOpen(false)
+                  }}
+                >
+                  <div className="list-card-top">
+                    <strong>{item.title}</strong>
+                    <span className={`badge badge-${item.severity === 'danger' ? 'danger' : item.severity === 'warning' ? 'warning' : 'info'}`}>
+                      {item.severity}
+                    </span>
+                  </div>
+                  <div>{item.message}</div>
+                  <div className="meta">{formatDateTime(item.timestamp)}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <button
+          className="notification-dock-button"
+          onClick={() => setNotificationsOpen((open) => !open)}
+        >
+          Notifications
+          {notificationBadgeCount > 0 ? <span className="notification-dock-badge">{notificationBadgeCount > 99 ? '99+' : notificationBadgeCount}</span> : null}
+        </button>
       </div>
     </div>
   )

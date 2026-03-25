@@ -44,6 +44,13 @@ function RequiredMark() {
   return <span className="ml-1 text-red-600">*</span>
 }
 
+function getMinDateTimeLocal() {
+  const now = new Date()
+  now.setSeconds(0, 0)
+  const timezoneOffset = now.getTimezoneOffset() * 60000
+  return new Date(now.getTime() - timezoneOffset).toISOString().slice(0, 16)
+}
+
 const FIELD_LABELS = {
   business_unit: 'Business Unit',
   exception_type: 'Exception Type',
@@ -115,7 +122,7 @@ function FormSection({ title, description, children }) {
 }
 
 // ─── Reusable Select field ────────────────────────────────────────────────────
-function SelectField({ control, name, label, description, placeholder, options, valueKey = 'id', labelKey, getOptionLabel, required = false }) {
+function SelectField({ control, name, label, description, placeholder, options, valueKey = 'id', labelKey, getOptionLabel, required = false, disabled = false }) {
   return (
     <FormField
       control={control}
@@ -124,7 +131,7 @@ function SelectField({ control, name, label, description, placeholder, options, 
         <FormItem>
           <FormLabel className={fieldState.error ? 'text-red-600' : ''}>{label}{required && <RequiredMark />}</FormLabel>
           <FormControl>
-            <Select onValueChange={field.onChange} value={field.value}>
+            <Select onValueChange={field.onChange} value={field.value} disabled={disabled}>
               <SelectTrigger className={`w-full ${fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''}`}>
                 <SelectValue placeholder={placeholder ?? `Select ${label.toLowerCase()}`} />
               </SelectTrigger>
@@ -154,6 +161,7 @@ export default function CreateExceptionPage() {
   const [loadingRef, setLoadingRef] = useState(true)
   const [refError, setRefError]     = useState(null)
   const [submitError, setSubmitError] = useState(null)
+  const [loadingApprover, setLoadingApprover] = useState(false)
 
   const savedDraft = getSavedDraft()
 
@@ -176,6 +184,27 @@ export default function CreateExceptionPage() {
       .catch(() => setRefError('Failed to load form options. Please refresh.'))
       .finally(() => setLoadingRef(false))
   }, [])
+
+  // Auto-populate assigned_approver when business_unit changes
+  useEffect(() => {
+    const businessUnitId = form.getValues('business_unit')
+    if (!businessUnitId) {
+      form.setValue('assigned_approver', '')
+      setLoadingApprover(false)
+      return
+    }
+
+    setLoadingApprover(true)
+    api.get(`/api/exceptions/get_approver_by_bu/?business_unit_id=${businessUnitId}`)
+      .then(response => {
+        form.setValue('assigned_approver', String(response.data.assigned_approver_id))
+      })
+      .catch(err => {
+        console.error('Failed to fetch approver:', err)
+        form.setValue('assigned_approver', '')
+      })
+      .finally(() => setLoadingApprover(false))
+  }, [form.watch('business_unit')])
 
   useEffect(() => {
     const subscription = form.watch((values) => {
@@ -319,9 +348,13 @@ export default function CreateExceptionPage() {
                   <FormItem>
                     <FormLabel className={fieldState.error ? 'text-red-600' : ''}>Exception End Date<RequiredMark /></FormLabel>
                     <FormControl>
-                      <Input type="datetime-local" className={fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''} {...field} />
+                      <Input
+                        type="datetime-local"
+                        min={getMinDateTimeLocal()}
+                        className={fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''}
+                        {...field}
+                      />
                     </FormControl>
-                    <FormDescription>When this exception must be remediated by</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -446,6 +479,7 @@ export default function CreateExceptionPage() {
                 control={form.control} name="assigned_approver" label="Assigned Approver (BU CIO)"
                 options={approverOptions} placeholder="Select approver"
                 getOptionLabel={formatUserOption} required
+                             disabled={loadingApprover}
               />
               <SelectField
                 control={form.control} name="risk_owner" label="Risk Owner"

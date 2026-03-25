@@ -6,7 +6,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from datetime import timedelta
 from django.contrib.auth.models import User, Group
+from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from .models import (
     ExceptionRequest,
@@ -30,7 +32,7 @@ def resolve_role_view(user):
         return "security"
     if user.groups.filter(name="Approver").exists():
         return "approver"
-    if user.groups.filter(name="RiskOwner").exists():
+    if user.groups.filter(name__in=["RiskOwner", "Risk Owner"]).exists():
         return "risk-owner"
     if user.groups.filter(name="Requestor").exists():
         return "requestor"
@@ -45,7 +47,15 @@ def get_visible_exceptions_for_user(user):
     if view == "approver":
         return ExceptionRequest.objects.filter(assigned_approver=user).exclude(status="Draft"), view
     if view == "risk-owner":
-        return ExceptionRequest.objects.filter(risk_owner=user).exclude(status="Draft"), view
+        queryset = ExceptionRequest.objects.filter(risk_owner=user).filter(
+            Q(status="AwaitingRiskOwner") |
+            Q(
+                status__in=["Approved", "Rejected", "Expired", "Closed"],
+                checkpoints__checkpoint="risk_assessment_notified",
+                checkpoints__status__in=["pending", "completed", "escalated"],
+            )
+        ).distinct()
+        return queryset, view
     return ExceptionRequest.objects.filter(requested_by=user), view
 
 
@@ -61,6 +71,41 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         visible, _ = get_visible_exceptions_for_user(self.request.user)
         return visible
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
+    def get_approver_by_bu(self, request):
+        """Retrieve the BU CIO (approver) for a given business unit ID."""
+        business_unit_id = request.query_params.get("business_unit_id")
+        
+        if not business_unit_id:
+            return Response(
+                {"error": "business_unit_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            business_unit = BusinessUnit.objects.get(id=business_unit_id)
+        except BusinessUnit.DoesNotExist:
+            return Response(
+                {"error": "Business unit not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if not business_unit.cio:
+            return Response(
+                {"error": "Business unit has no assigned CIO"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        cio = business_unit.cio
+        return Response(
+            {
+                "assigned_approver_id": cio.id,
+                "assigned_approver_name": cio.get_full_name() or cio.username,
+                "assigned_approver_email": cio.email,
+            },
+            status=status.HTTP_200_OK
+        )
 
     def perform_create(self, serializer):
         """Set requestor automatically on creation."""
@@ -349,6 +394,63 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
         except ValueError as e:
             raise ValidationError(str(e))
 
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def update_end_date(self, request, pk=None):
+        """Allow approver/risk-owner/security to update exception end date with mandatory notes."""
+        exception = self.get_object()
+
+        is_assigned_approver = exception.assigned_approver == request.user
+        is_risk_owner = request.user == exception.risk_owner
+        is_security = request.user.groups.filter(name="Security").exists()
+        if not (is_assigned_approver or is_risk_owner or is_security):
+            raise PermissionDenied(
+                "Only assigned approver, risk owner, or Security team can update end date."
+            )
+
+        if exception.status in {"Closed", "Expired"}:
+            raise ValidationError("End date cannot be changed for Closed or Expired exceptions.")
+
+        end_date_raw = request.data.get("exception_end_date")
+        if not end_date_raw:
+            raise ValidationError({"exception_end_date": "This field is required."})
+
+        new_end_date = parse_datetime(str(end_date_raw))
+        if new_end_date is None:
+            raise ValidationError({"exception_end_date": "Invalid datetime format."})
+        if timezone.is_naive(new_end_date):
+            new_end_date = timezone.make_aware(new_end_date, timezone.get_current_timezone())
+        if new_end_date <= timezone.now():
+            raise ValidationError({"exception_end_date": "End date must be in the future."})
+
+        notes = (request.data.get("notes") or "").strip()
+        if not notes:
+            raise ValidationError({"notes": "Notes are required when updating end date."})
+
+        previous_end_date = exception.exception_end_date
+        exception.exception_end_date = new_end_date
+        exception.save(update_fields=["exception_end_date", "updated_at"])
+
+        actor_name = request.user.get_full_name() or request.user.username
+        AuditLog.objects.create(
+            exception_request=exception,
+            action_type="UPDATE",
+            previous_status=exception.status,
+            new_status=exception.status,
+            performed_by=request.user,
+            details={
+                "message": f"{actor_name} updated exception end date.",
+                "end_date_change": True,
+                "previous_end_date": previous_end_date.isoformat() if previous_end_date else None,
+                "new_end_date": new_end_date.isoformat(),
+                "notes": notes,
+            },
+        )
+
+        return Response({
+            "message": "Exception end date updated successfully.",
+            "new_end_date": new_end_date.isoformat(),
+        }, status=status.HTTP_200_OK)
+
 
 class ReferenceDataView(APIView):
     """Single endpoint returning all lookup data needed to populate create/edit forms."""
@@ -357,7 +459,7 @@ class ReferenceDataView(APIView):
     def get(self, request):
         active_users = User.objects.filter(is_active=True).order_by('last_name', 'first_name')
         approvers = active_users.filter(groups__name='Approver').distinct()
-        risk_owners = active_users.filter(groups__name='RiskOwner').distinct()
+        risk_owners = active_users.filter(groups__name__in=['RiskOwner', 'Risk Owner']).distinct()
 
         return Response({
             "business_units":      BusinessUnitSerializer(BusinessUnit.objects.select_related('cio').all(), many=True).data,
@@ -458,16 +560,24 @@ class WorklistNotificationsView(APIView):
             })
 
         reminder_logs = ReminderLog.objects.filter(exception_request__in=visible)
-        if view in {"approver", "risk-owner"}:
+        if view in {"approver", "risk-owner", "requestor"}:
             reminder_logs = reminder_logs.filter(sent_to=user)
         reminder_logs = reminder_logs.select_related("exception_request", "sent_to").order_by("-sent_at")[:20]
 
         for log in reminder_logs:
+            message = f"{log.reminder_type} for Exception #{log.exception_request_id}"
+            title = f"Reminder {log.delivery_status}"
+            if (log.message_content or "").startswith("ACTIVE_EXPIRY:"):
+                marker = (log.message_content or "").split("\n", 1)[0]
+                stage = marker.split(":", 1)[1] if ":" in marker else ""
+                message = f"Exception #{log.exception_request_id} reached active reminder stage {stage}."
+                title = "Active exception expiry reminder"
+
             events.append({
                 "event_type": "reminder_sent" if log.delivery_status == "sent" else "reminder_failed",
                 "severity": "info" if log.delivery_status == "sent" else "danger",
-                "title": f"Reminder {log.delivery_status}",
-                "message": f"{log.reminder_type} for Exception #{log.exception_request_id}",
+                "title": title,
+                "message": message,
                 "exception_id": log.exception_request_id,
                 "status": log.exception_request.status if log.exception_request else None,
                 "timestamp": log.sent_at,

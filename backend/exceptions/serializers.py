@@ -35,6 +35,7 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
     checkpoints = CheckpointSerializer(many=True, read_only=True)
     submitted_at = serializers.SerializerMethodField()
     rejection_feedback = serializers.SerializerMethodField()
+    end_date_change_history = serializers.SerializerMethodField()
 
     class Meta:
         model = ExceptionRequest
@@ -51,6 +52,7 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
             "checkpoints",
             "submitted_at",
             "rejection_feedback",
+            "end_date_change_history",
         )
 
     def get_submitted_at(self, obj):
@@ -85,6 +87,28 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
 
         return ""
 
+    def get_end_date_change_history(self, obj):
+        updates = AuditLog.objects.filter(
+            exception_request=obj,
+            action_type="UPDATE",
+            details__end_date_change=True,
+        ).select_related("performed_by").order_by("-timestamp")[:20]
+
+        result = []
+        for entry in updates:
+            actor = entry.performed_by
+            actor_name = actor.get_full_name() if actor else ""
+            actor_name = actor_name or (actor.username if actor else "System")
+            details = entry.details or {}
+            result.append({
+                "timestamp": entry.timestamp,
+                "performed_by": actor_name,
+                "previous_end_date": details.get("previous_end_date"),
+                "new_end_date": details.get("new_end_date"),
+                "notes": details.get("notes", ""),
+            })
+        return result
+
     def validate_exception_end_date(self, value):
         """Ensure exception validity period is in the future."""
         if not value:
@@ -105,6 +129,20 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Minimum 10 characters.")
         return value
 
+    def validate_risk_owner(self, value):
+        if value is None:
+            raise serializers.ValidationError("This field is required.")
+
+        if not value.is_active:
+            raise serializers.ValidationError("Selected risk owner is inactive.")
+
+        if not value.groups.filter(name__in=['RiskOwner', 'Risk Owner']).exists():
+            raise serializers.ValidationError(
+                "Selected user must belong to the RiskOwner group."
+            )
+
+        return value
+
     def validate_reason_for_exception(self, value):
         if len((value or '').strip()) < 20:
             raise serializers.ValidationError("Minimum 20 characters.")
@@ -122,6 +160,25 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"data_components": "At least one data component must be selected."}
             )
+
+        # Validate that assigned_approver matches business_unit's CIO
+        if not self.instance:  # Only validate on creation, not update
+            business_unit = data.get('business_unit')
+            assigned_approver = data.get('assigned_approver')
+
+            if business_unit and assigned_approver:
+                if business_unit.cio_id != assigned_approver.id:
+                    raise serializers.ValidationError(
+                        {
+                            "assigned_approver": (
+                                f"Assigned approver must be the CIO of the selected business unit. "
+                                f"The CIO for {business_unit.name} is {business_unit.cio.get_full_name() or business_unit.cio.username}."
+                            )
+                        }
+                    )
+
+        if self.instance and 'risk_owner' in data:
+            self.validate_risk_owner(data.get('risk_owner'))
         
         return data
 
