@@ -45,10 +45,14 @@ def setup_test_data():
     outsider = User.objects.create_user('test_outsider', 'out@test.com', 'testpass123')
     system_user, _ = User.objects.get_or_create(username='system', defaults={'email': 'system@test.com'})
 
-    Group.objects.get_or_create(name='Requestor')
-    Group.objects.get_or_create(name='Approver')
-    Group.objects.get_or_create(name='Risk Owner')
+    requestor_group, _ = Group.objects.get_or_create(name='Requestor')
+    approver_group, _ = Group.objects.get_or_create(name='Approver')
+    risk_owner_group, _ = Group.objects.get_or_create(name='Risk Owner')
     Group.objects.get_or_create(name='Security')
+
+    requestor.groups.add(requestor_group)
+    approver.groups.add(approver_group)
+    risk_owner.groups.add(risk_owner_group)
 
     bu, _ = BusinessUnit.objects.get_or_create(
         bu_code='FIN',
@@ -264,7 +268,13 @@ def test_scheduler_behaviour(test_data):
 
 if __name__ == '__main__':
     try:
-        ExceptionRequest.objects.filter(requested_by__username__startswith='test_').delete()
+        # Clean up test data (delete exceptions first due to PROTECT constraint on users)
+        from django.db.models import Q
+        ExceptionRequest.objects.filter(
+            Q(requested_by__username__startswith='test_') |
+            Q(assigned_approver__username__startswith='test_') |
+            Q(risk_owner__username__startswith='test_')
+        ).delete()
         User.objects.filter(username__startswith='test_').delete()
 
         data = setup_test_data()

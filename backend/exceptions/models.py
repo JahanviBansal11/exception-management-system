@@ -174,7 +174,7 @@ class ExceptionRequest(models.Model):
     data_classification = models.ForeignKey(DataClassification, on_delete=models.PROTECT)
     data_components = models.ManyToManyField(DataComponent)
     internet_exposure = models.ForeignKey(InternetExposure, on_delete=models.PROTECT)
-    number_of_assets = models.IntegerField()
+    number_of_assets = models.IntegerField(help_text="Number of assets affected (minimum 1)")
     
     # ===== DESCRIPTION FIELDS =====
     short_description = models.TextField()
@@ -182,8 +182,20 @@ class ExceptionRequest(models.Model):
     compensatory_controls = models.TextField(blank=True)
     
     # ===== CALCULATED RISK FIELDS =====
-    risk_score = models.IntegerField(blank=True, null=True)
-    risk_rating = models.CharField(max_length=20, blank=True)
+    RISK_RATING_CHOICES = [
+        ('Low', 'Low Risk'),
+        ('Medium', 'Medium Risk'),
+        ('High', 'High Risk'),
+        ('Critical', 'Critical Risk'),
+    ]
+    
+    risk_score = models.IntegerField(blank=True, null=True, help_text="Calculated risk score (0+)")
+    risk_rating = models.CharField(
+        max_length=20,
+        choices=RISK_RATING_CHOICES,
+        blank=True,
+        help_text="Risk rating category derived from risk score"
+    )
     
     # ===== LIFECYCLE TIMING FIELDS (CRITICAL FOR AUTOMATION) =====
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -269,6 +281,22 @@ class ExceptionRequest(models.Model):
             models.Index(fields=['requested_by', 'status']),
             models.Index(fields=['assigned_approver', 'status']),
             models.Index(fields=['created_at', 'status']),
+            # Scheduler query optimization
+            models.Index(fields=['status', 'approval_deadline']),
+            models.Index(fields=['status', 'exception_end_date']),
+            models.Index(fields=['reminder_stage', 'approval_deadline']),
+            # Business unit queries
+            models.Index(fields=['business_unit', 'status']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(number_of_assets__gte=1),
+                name='exception_number_of_assets_gte_1',
+            ),
+            models.CheckConstraint(
+                check=models.Q(risk_score__gte=0) | models.Q(risk_score__isnull=True),
+                name='exception_risk_score_gte_0_or_null',
+            ),
         ]
         verbose_name = "Exception Request"
         verbose_name_plural = "Exception Requests"

@@ -70,7 +70,17 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         visible, _ = get_visible_exceptions_for_user(self.request.user)
-        return visible
+        return visible.prefetch_related(
+            'checkpoints',
+            'audit_logs',
+            'reminder_logs',
+            'data_components',
+            'business_unit__cio',
+            'exception_type',
+            'requested_by',
+            'assigned_approver',
+            'risk_owner',
+        )
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
     def get_approver_by_bu(self, request):
