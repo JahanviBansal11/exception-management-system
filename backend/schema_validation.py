@@ -125,7 +125,7 @@ class SchemaValidator:
         required_indexes = [
             'exception_status_deadline_idx',  # (status, approval_deadline)
             'exception_status_enddate_idx',   # (status, exception_end_date)
-            'exception_reminder_deadline_idx', # (reminder_stage, approval_deadline)
+            'exc_reminder_deadln_idx', # (reminder_stage, approval_deadline)
             'exception_bu_status_idx',        # (business_unit, status)
         ]
         
@@ -133,7 +133,7 @@ class SchemaValidator:
             if any(req_idx in idx for idx in index_names):
                 self.log_pass(f"Index for {req_idx} exists")
             else:
-                self.log_warn(f"Index for {req_idx} NOT YET created (will be in migration)")
+                self.log_warn(f"Index for {req_idx} is missing")
     
     def validate_constraints(self):
         """Check database constraints."""

@@ -274,11 +274,11 @@ class ExceptionRequest(models.Model):
             models.Index(fields=['assigned_approver', 'status']),
             models.Index(fields=['created_at', 'status']),
             # Scheduler query optimization
-            models.Index(fields=['status', 'approval_deadline']),
-            models.Index(fields=['status', 'exception_end_date']),
-            models.Index(fields=['reminder_stage', 'approval_deadline']),
+            models.Index(fields=['status', 'approval_deadline'], name='exception_status_deadline_idx'),
+            models.Index(fields=['status', 'exception_end_date'], name='exception_status_enddate_idx'),
+            models.Index(fields=['reminder_stage', 'approval_deadline'], name='exc_reminder_deadln_idx'),
             # Business unit queries
-            models.Index(fields=['business_unit', 'status']),
+            models.Index(fields=['business_unit', 'status'], name='exception_bu_status_idx'),
         ]
         constraints = [
             models.CheckConstraint(
@@ -738,7 +738,7 @@ class AuditLog(models.Model):
     class Meta:
         ordering = ['-timestamp']
         indexes = [
-            models.Index(fields=['exception_request', '-timestamp']),
+            models.Index(fields=['exception_request', '-timestamp'], name='auditlog_exc_ts_idx'),
             models.Index(fields=['timestamp']),
         ]
 

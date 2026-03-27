@@ -110,6 +110,12 @@ Critical indexes currently present for scheduler and queues:
 - `(status, exception_end_date)`
 - `(reminder_stage, approval_deadline)`
 - `(business_unit, status)`
+- canonical index names:
+	- `exception_status_deadline_idx`
+	- `exception_status_enddate_idx`
+	- `exc_reminder_deadln_idx`
+	- `exception_bu_status_idx`
+	- `auditlog_exc_ts_idx`
 - plus queue/sort indexes (`requested_by,status`, `assigned_approver,status`, `created_at,status`, etc.)
 
 Notes:
@@ -124,6 +130,7 @@ Applied sequence:
 - `0001` to `0007` base and workflow migrations
 - `0008_schema_freeze_validations` (constraints + scheduler indexes)
 - `0009_...` (remove `assigned_risk_owner`, finalize field metadata)
+- `0010_...` (normalize key index names and remove redundant auditlog index)
 
 ---
 
