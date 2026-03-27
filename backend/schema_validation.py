@@ -141,10 +141,12 @@ class SchemaValidator:
         
         cursor = connection.cursor()
         cursor.execute("""
-            SELECT constraint_name FROM information_schema.constraint_column_usage
-            WHERE table_name = 'exceptions_exceptionrequest'
-            AND constraint_name LIKE '%check%'
-            ORDER BY constraint_name;
+            SELECT conname
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'exceptions_exceptionrequest'
+            AND c.contype = 'c'
+            ORDER BY conname;
         """)
         
         constraints = cursor.fetchall()
@@ -159,7 +161,7 @@ class SchemaValidator:
             if any(req_const in c for c in constraint_names):
                 self.log_pass(f"Constraint {req_const} exists")
             else:
-                self.log_warn(f"Constraint {req_const} NOT YET created (will be in migration)")
+                self.log_warn(f"Constraint {req_const} is missing")
     
     def validate_workflow_logic(self):
         """Validate workflow logic is sound."""

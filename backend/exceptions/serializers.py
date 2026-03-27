@@ -39,7 +39,39 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ExceptionRequest
-        fields = "__all__"
+        fields = (
+            "id",
+            "business_unit",
+            "exception_type",
+            "risk_issue",
+            "asset_type",
+            "asset_purpose",
+            "data_classification",
+            "data_components",
+            "internet_exposure",
+            "number_of_assets",
+            "short_description",
+            "reason_for_exception",
+            "compensatory_controls",
+            "risk_score",
+            "risk_rating",
+            "created_at",
+            "updated_at",
+            "approval_deadline",
+            "approved_at",
+            "exception_end_date",
+            "last_reminder_sent",
+            "reminder_stage",
+            "status",
+            "requested_by",
+            "assigned_approver",
+            "risk_owner",
+            "version",
+            "checkpoints",
+            "submitted_at",
+            "rejection_feedback",
+            "end_date_change_history",
+        )
         read_only_fields = (
             "requested_by",
             "risk_score",

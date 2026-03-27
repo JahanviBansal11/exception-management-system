@@ -261,14 +261,6 @@ class ExceptionRequest(models.Model):
         related_name="risk_owned_exceptions"
     )
     
-    assigned_risk_owner = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="risk_assessments"
-    )
-    
     # ===== OPTIMISTIC LOCKING & VERSIONING =====
     version = models.IntegerField(default=0)
     
