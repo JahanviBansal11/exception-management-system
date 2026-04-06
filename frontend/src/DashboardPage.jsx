@@ -19,6 +19,24 @@ const ACTION_CONFIG = {
   close: { endpoint: 'close', label: 'Close', allowedStatuses: ['Approved'] },
 }
 
+const ACTIONS_USING_NOTES = new Set(['bu_approve', 'bu_reject', 'risk_assess', 'risk_reject'])
+
+function actionUsesNotes(actionKey) {
+  return ACTIONS_USING_NOTES.has(actionKey)
+}
+
+function actionRequiresNotes(actionKey, exceptionItem) {
+  if (actionKey === 'bu_reject' || actionKey === 'risk_reject') {
+    return true
+  }
+
+  if (actionKey === 'bu_approve') {
+    return ['High', 'Critical'].includes(exceptionItem?.risk_rating)
+  }
+
+  return false
+}
+
 const SORT_OPTIONS = [
   { value: 'newest', label: 'Newest first' },
   { value: 'oldest', label: 'Oldest first' },
@@ -46,25 +64,77 @@ function statusTone(status) {
   return tones[status] || 'muted'
 }
 
+const AUDIT_ACTION_LABELS = {
+  SUBMIT: 'Submitted',
+  APPROVE: 'Approved',
+  REJECT: 'Rejected',
+  CLOSE: 'Closed',
+  EXPIRE: 'Expired',
+  REMIND: 'Reminder Sent',
+  ESCALATE: 'Escalated',
+  UPDATE: 'Updated',
+}
+
+function getAuditActionLabel(actionType) {
+  return AUDIT_ACTION_LABELS[actionType] || actionType || 'Updated'
+}
+
+function getAuditSummary(log) {
+  const details = log?.details || {}
+  const summary = []
+
+  if (details.message) {
+    summary.push(details.message)
+  }
+
+  if (details.feedback) {
+    summary.push(`Feedback: ${details.feedback}`)
+  }
+
+  if (details.notes) {
+    summary.push(`Notes: ${details.notes}`)
+  }
+
+  if (details.decision) {
+    summary.push(`Decision: ${String(details.decision)}`)
+  }
+
+  if (details.risk_rating) {
+    summary.push(`Risk Rating: ${String(details.risk_rating)}`)
+  }
+
+  if (Array.isArray(details.changed_fields) && details.changed_fields.length > 0) {
+    summary.push(`Updated Fields: ${details.changed_fields.join(', ')}`)
+  }
+
+  if (details.end_date_change) {
+    const fromValue = details.previous_end_date ? formatDateTimeCompact(details.previous_end_date) : '—'
+    const toValue = details.new_end_date ? formatDateTimeCompact(details.new_end_date) : '—'
+    summary.push(`End Date: ${fromValue} → ${toValue}`)
+  }
+
+  return summary.slice(0, 3)
+}
+
 function formatDateTime(value) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear()).slice(-2)}`
+  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear())}`
 }
 
 function formatDateTimeCompact(value) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear()).slice(-2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear())} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
 function formatDateTimeWithSeconds(value) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear()).slice(-2)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
+  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getFullYear())} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
 }
 
 function toDateTimeLocalValue(value) {
@@ -83,6 +153,14 @@ function getRequestedPeriodDays(item) {
   const diffMs = endDate.getTime() - created.getTime()
   if (Number.isNaN(diffMs) || diffMs <= 0) return 0
   return Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+}
+
+function isApprovalOverdue(item) {
+  if (!item?.approval_deadline) return false
+  if (!['Submitted', 'AwaitingRiskOwner'].includes(item.status)) return false
+  const deadline = new Date(item.approval_deadline)
+  if (Number.isNaN(deadline.getTime())) return false
+  return deadline.getTime() < Date.now()
 }
 
 function sortExceptions(items, sortKey) {
@@ -185,6 +263,9 @@ function DashboardPage({ view }) {
   const [items, setItems] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [selected, setSelected] = useState(null)
+  const [auditLogs, setAuditLogs] = useState([])
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false)
+  const [auditLogsError, setAuditLogsError] = useState('')
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [loadingNotifications, setLoadingNotifications] = useState(false)
@@ -201,11 +282,13 @@ function DashboardPage({ view }) {
   const [statusFilterEnabled, setStatusFilterEnabled] = useState(false)
   const [riskFilterEnabled, setRiskFilterEnabled] = useState(false)
   const [activeKpi, setActiveKpi] = useState('')
-  const [actionNotes, setActionNotes] = useState('')
-  const [endDateInput, setEndDateInput] = useState('')
-  const [endDateNotes, setEndDateNotes] = useState('')
+  const [actionNotesDrafts, setActionNotesDrafts] = useState({})
+  const [endDateInputDrafts, setEndDateInputDrafts] = useState({})
+  const [endDateNotesDrafts, setEndDateNotesDrafts] = useState({})
   const [endDateUpdateError, setEndDateUpdateError] = useState('')
   const [updatingEndDate, setUpdatingEndDate] = useState(false)
+  const [showEndDateEditor, setShowEndDateEditor] = useState(false)
+  const [showEndDateHistory, setShowEndDateHistory] = useState(false)
   const [adminUsers, setAdminUsers] = useState([])
   const [adminRoles, setAdminRoles] = useState([])
   const [loadingAdminUsers, setLoadingAdminUsers] = useState(false)
@@ -213,6 +296,12 @@ function DashboardPage({ view }) {
   const [adminSearch, setAdminSearch] = useState('')
   const [adminRoleFilter, setAdminRoleFilter] = useState('all')
   const [adminStatusFilter, setAdminStatusFilter] = useState('all')
+  const [expandedTabs, setExpandedTabs] = useState({
+    exceptionDetails: true,
+    timeline: false,
+    checkpoints: false,
+    auditLogs: false,
+  })
   const [adminSortKey, setAdminSortKey] = useState('username_asc')
   const [activeAdminSection, setActiveAdminSection] = useState('')
   const [adminPageSize, setAdminPageSize] = useState(25)
@@ -261,6 +350,34 @@ function DashboardPage({ view }) {
       setLoadingDetail(false)
     }
   }, [])
+
+  const loadAuditLogs = useCallback(async (id) => {
+    if (!id || view !== 'security') {
+      setAuditLogs([])
+      setAuditLogsError('')
+      setLoadingAuditLogs(false)
+      return
+    }
+
+    setLoadingAuditLogs(true)
+    setAuditLogsError('')
+    try {
+      const response = await api.get(`/api/exceptions/${id}/audit_logs/?limit=100`)
+      setAuditLogs(response.data.results || [])
+    } catch (error) {
+      const status = error?.response?.status
+      if (status === 403) {
+        setAuditLogsError('You do not have permission to view audit logs.')
+      } else if (status === 404) {
+        setAuditLogsError('Audit logs were not found for this exception.')
+      } else {
+        setAuditLogsError('Failed to load audit logs.')
+      }
+      setAuditLogs([])
+    } finally {
+      setLoadingAuditLogs(false)
+    }
+  }, [view])
 
   const loadSummary = useCallback(async () => {
     const response = await api.get('/api/worklist/summary/')
@@ -337,15 +454,32 @@ function DashboardPage({ view }) {
   }, [selectedId, loadExceptionDetail])
 
   useEffect(() => {
-    if (!selected) {
-      setEndDateInput('')
-      setEndDateNotes('')
-      setEndDateUpdateError('')
+    if (view !== 'security') {
+      setAuditLogs([])
+      setAuditLogsError('')
+      setLoadingAuditLogs(false)
       return
     }
-    setEndDateInput(toDateTimeLocalValue(selected.exception_end_date))
-    setEndDateNotes('')
+
+    if (!selected?.id) {
+      setAuditLogs([])
+      setAuditLogsError('')
+      setLoadingAuditLogs(false)
+      return
+    }
+
+    loadAuditLogs(selected.id)
+  }, [view, selected?.id, loadAuditLogs])
+
+  useEffect(() => {
+    if (!selected) {
+      setEndDateUpdateError('')
+      setShowEndDateEditor(false)
+      return
+    }
     setEndDateUpdateError('')
+    setShowEndDateEditor(false)
+    setShowEndDateHistory(false)
   }, [selected])
 
   const availableActions = useMemo(() => {
@@ -366,6 +500,25 @@ function DashboardPage({ view }) {
   }, [items])
 
   const canUseRiskFilter = ['approver', 'security'].includes(view)
+  const canViewAuditLogs = view === 'security'
+  const toggleTab = (tabName) => {
+    setExpandedTabs((current) => ({
+      ...current,
+      [tabName]: !current[tabName],
+    }))
+  }
+  const selectedActionNotes = selected?.id ? (actionNotesDrafts[selected.id] || '') : ''
+  const selectedEndDateInput = selected?.id ? (endDateInputDrafts[selected.id] ?? toDateTimeLocalValue(selected.exception_end_date)) : ''
+  const selectedEndDateNotes = selected?.id ? (endDateNotesDrafts[selected.id] || '') : ''
+  const availableActionsUsingNotes = useMemo(
+    () => availableActions.filter(([actionKey]) => actionUsesNotes(actionKey)),
+    [availableActions],
+  )
+  const hasRequiredNotesAction = useMemo(
+    () => availableActionsUsingNotes.some(([actionKey]) => actionRequiresNotes(actionKey, selected)),
+    [availableActionsUsingNotes, selected],
+  )
+  const showActionNotesBox = availableActionsUsingNotes.length > 0
   const effectiveStatusFilters = statusFilterEnabled ? selectedStatusFilters : []
   const effectiveRiskFilters = riskFilterEnabled && canUseRiskFilter ? selectedRiskFilters : []
 
@@ -400,17 +553,15 @@ function DashboardPage({ view }) {
     setActionError('')
     try {
       const config = ACTION_CONFIG[actionKey]
-      const notes = actionNotes.trim()
-      const requiresRejectionFeedback = actionKey === 'bu_reject' || actionKey === 'risk_reject'
-      const requiresHighRiskApprovalNotes = actionKey === 'bu_approve' && ['High', 'Critical'].includes(selected.risk_rating)
+      const notes = selectedActionNotes.trim()
+      const requiresNotes = actionRequiresNotes(actionKey, selected)
 
-      if (requiresRejectionFeedback && !notes) {
-        setActionError('Feedback is mandatory for rejection.')
-        return
-      }
-
-      if (requiresHighRiskApprovalNotes && !notes) {
-        setActionError('Notes are mandatory when approving High/Critical exceptions.')
+      if (requiresNotes && !notes) {
+        if (actionKey === 'bu_approve') {
+          setActionError('Notes are mandatory for High/Critical BU approval.')
+        } else {
+          setActionError('Feedback is mandatory for rejection.')
+        }
         return
       }
 
@@ -419,7 +570,11 @@ function DashboardPage({ view }) {
       await loadExceptionDetail(selected.id)
       await loadSummary()
       await loadNotifications()
-      setActionNotes('')
+      setActionNotesDrafts((current) => {
+        const next = { ...current }
+        delete next[selected.id]
+        return next
+      })
     } catch (error) {
       const status = error?.response?.status
       if (status === 404) {
@@ -443,28 +598,38 @@ function DashboardPage({ view }) {
     if (!selected) return
     setEndDateUpdateError('')
 
-    if (!endDateInput) {
+    if (!selectedEndDateInput) {
       setEndDateUpdateError('Please select a new end date.')
       return
     }
-    if (!endDateNotes.trim()) {
+    if (!selectedEndDateNotes.trim()) {
       setEndDateUpdateError('Please provide notes for this end date update.')
       return
     }
 
     setUpdatingEndDate(true)
     try {
-      const isoEndDate = new Date(endDateInput).toISOString()
+      const isoEndDate = new Date(selectedEndDateInput).toISOString()
       await api.post(`/api/exceptions/${selected.id}/update_end_date/`, {
         exception_end_date: isoEndDate,
-        notes: endDateNotes.trim(),
+        notes: selectedEndDateNotes.trim(),
       })
 
       await loadExceptions()
       await loadExceptionDetail(selected.id)
       await loadSummary()
       await loadNotifications()
-      setEndDateNotes('')
+      setEndDateInputDrafts((current) => {
+        const next = { ...current }
+        delete next[selected.id]
+        return next
+      })
+      setEndDateNotesDrafts((current) => {
+        const next = { ...current }
+        delete next[selected.id]
+        return next
+      })
+      setShowEndDateEditor(false)
     } catch (error) {
       const detail = error?.response?.data
       if (typeof detail?.detail === 'string') {
@@ -597,13 +762,18 @@ function DashboardPage({ view }) {
         <div>
           <h2>{title}</h2>
           <div className="meta">
-            Signed in as <strong>{user?.username}</strong> ({(user?.groups || []).join(', ') || 'No Group'})
+            Signed in as <strong>{user?.username}</strong> (ID: {user?.id ?? '—'}) ({(user?.groups || []).join(', ') || 'No Group'})
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           {canCreateException ? (
             <button className="btn" style={{ width: 'auto' }} onClick={() => navigate('/exceptions/new')}>
               + New Exception
+            </button>
+          ) : null}
+          {view === 'security' ? (
+            <button className="btn" style={{ width: 'auto' }} onClick={() => navigate('/audit-log')}>
+              Audit Log
             </button>
           ) : null}
           <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={logout}>
@@ -1002,142 +1172,263 @@ function DashboardPage({ view }) {
 
           {selected ? (
             <>
-              <div className="detail-grid">
-                <div><strong>ID:</strong> #{selected.id}</div>
-                <div><strong>Status:</strong> <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span></div>
-                <div><strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})</div>
-                <div><strong>Business Unit:</strong> {selected.business_unit}</div>
-                <div><strong>Assigned Approver:</strong> {selected.assigned_approver}</div>
-                <div><strong>Risk Owner:</strong> {selected.risk_owner}</div>
-              </div>
-
-              <div className="section-block">
-                <strong>Timeline</strong>
-                <div className="detail-grid" style={{ marginTop: '8px' }}>
-                  {['approver', 'risk-owner'].includes(view)
-                    ? <div><strong>Submitted On:</strong> {formatDateTime(selected.submitted_at)}</div>
-                    : <div><strong>Created On:</strong> {formatDateTime(selected.created_at)}</div>}
-                  <div><strong>Last Updated On:</strong> {formatDateTime(selected.updated_at)}</div>
-                  {view !== 'requestor' ? (
-                    <div><strong>Approval Deadline:</strong> {formatDateTimeCompact(selected.approval_deadline)}</div>
-                  ) : null}
-                  <div><strong>Approved On:</strong> {formatDateTime(selected.approved_at)}</div>
-                  <div><strong>Requested Active Period:</strong> {getRequestedPeriodDays(selected) ?? '—'} day(s)</div>
+              {/* Exception Details Tab */}
+              <div className="section-block" style={{ marginBottom: '0', borderBottom: '1px solid #e5e7eb', paddingBottom: '0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '12px 0' }} onClick={() => toggleTab('exceptionDetails')}>
+                  <span style={{ fontSize: '1.2em', transition: 'transform 0.2s', transform: expandedTabs.exceptionDetails ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                  <strong>Exception Details</strong>
                 </div>
-              </div>
-
-              <div className="section-block">
-                <strong>Dates</strong>
-                <div className="detail-grid" style={{ marginTop: '8px' }}>
-                  <div><strong>Current End Date:</strong> {formatDateTimeCompact(selected.exception_end_date)}</div>
-                </div>
-
-                {canUpdateEndDate ? (
-                  <div style={{ marginTop: '10px' }}>
+                {expandedTabs.exceptionDetails && (
+                  <div style={{ paddingTop: '12px' }}>
                     <div className="detail-grid">
-                      <div>
-                        <label className="meta">New End Date</label>
-                        <input
-                          type="datetime-local"
-                          value={endDateInput}
-                          onChange={(event) => setEndDateInput(event.target.value)}
-                        />
-                      </div>
-                      <div>
-                        <label className="meta">Notes</label>
-                        <textarea
-                          className="action-notes"
-                          placeholder="Why is the end date changing?"
-                          value={endDateNotes}
-                          onChange={(event) => setEndDateNotes(event.target.value)}
-                        />
-                      </div>
+                      <div><strong>ID:</strong> #{selected.id}</div>
+                      <div><strong>Status:</strong> <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span></div>
+                      <div><strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})</div>
+                      <div><strong>Business Unit:</strong> {selected.business_unit}</div>
+                      <div><strong>Created By:</strong> {selected.requested_by} ({selected.requested_by_username || '—'})</div>
+                      <div><strong>Assigned Approver:</strong> {selected.assigned_approver} ({selected.assigned_approver_username || '—'})</div>
+                      <div><strong>Risk Owner:</strong> {selected.risk_owner} ({selected.risk_owner_username || '—'})</div>
                     </div>
-                    <div style={{ marginTop: '8px' }}>
-                      <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={updateExceptionEndDate} disabled={updatingEndDate}>
-                        {updatingEndDate ? 'Updating...' : 'Update End Date'}
-                      </button>
-                    </div>
-                    {endDateUpdateError ? <div className="error" style={{ marginTop: '8px' }}>{endDateUpdateError}</div> : null}
                   </div>
-                ) : null}
+                )}
+              </div>
 
-                <div className="checkpoint-list" style={{ marginTop: '10px' }}>
-                  {(selected.end_date_change_history || []).length === 0 ? (
-                    <div className="meta">No end date changes recorded.</div>
-                  ) : (
-                    (selected.end_date_change_history || []).map((entry, index) => (
-                      <div key={`${entry.timestamp || 'na'}-${index}`} className="checkpoint-item">
-                        <div className="list-card-top">
-                          <span><strong>{entry.performed_by || 'System'}</strong> updated end date</span>
-                          <span className="badge badge-info">change</span>
-                        </div>
-                        <div className="meta">From: {formatDateTimeCompact(entry.previous_end_date)}</div>
-                        <div className="meta">To: {formatDateTimeCompact(entry.new_end_date)}</div>
-                        <div className="meta">When: {formatDateTimeWithSeconds(entry.timestamp)}</div>
-                        {entry.notes ? <div className="meta">Notes: {entry.notes}</div> : null}
+              <div className="section-block" style={{ borderBottom: '1px solid #e5e7eb', paddingBottom: '12px' }}>
+                <strong>Available Actions</strong>
+                <div style={{ marginTop: '10px' }}>
+                  {showActionNotesBox ? (
+                    <>
+                      <label className="meta" style={{ display: 'block', marginBottom: '4px' }}>
+                        Notes {hasRequiredNotesAction ? <span className="error" style={{ display: 'inline', marginBottom: 0 }}>*</span> : null}
+                      </label>
+                      <textarea
+                        className="action-notes"
+                        placeholder="Add notes"
+                        value={selectedActionNotes}
+                        onChange={(event) => {
+                          if (!selected?.id) return
+                          setActionNotesDrafts((current) => ({
+                            ...current,
+                            [selected.id]: event.target.value,
+                          }))
+                        }}
+                      />
+                      <div className="meta" style={{ marginTop: '4px' }}>
+                        Notes are required for rejection. For approvals, notes are optional except High/Critical BU approvals.
                       </div>
-                    ))
+                    </>
+                  ) : null}
+
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: showActionNotesBox ? '8px' : 0 }}>
+                    {availableActions.length === 0 ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
+                    {availableActions.map(([actionKey, config]) => (
+                      <button
+                        key={actionKey}
+                        className="btn"
+                        style={{ width: 'auto' }}
+                        onClick={() => runAction(actionKey)}
+                      >
+                        {config.label}
+                        {actionRequiresNotes(actionKey, selected) ? <span className="error" style={{ display: 'inline', marginLeft: '4px', marginBottom: 0 }}>*</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                  {actionError ? <div className="error" style={{ marginTop: '8px' }}>{actionError}</div> : null}
+                </div>
+              </div>
+
+              {/* Timeline Tab */}
+              <div className="section-block" style={{ marginBottom: '0', borderBottom: '1px solid #e5e7eb', paddingBottom: '0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '12px 0' }} onClick={() => toggleTab('timeline')}>
+                  <span style={{ fontSize: '1.2em', transition: 'transform 0.2s', transform: expandedTabs.timeline ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                  <strong>Timeline</strong>
+                </div>
+                {expandedTabs.timeline && (
+                  <div style={{ paddingTop: '12px' }}>
+                    <div className="detail-grid">
+                      {['approver', 'risk-owner'].includes(view)
+                        ? <div><strong>Submitted On:</strong> {formatDateTime(selected.submitted_at)}</div>
+                        : <div><strong>Created On:</strong> {formatDateTime(selected.created_at)}</div>}
+                      <div><strong>Last Updated On:</strong> {formatDateTime(selected.updated_at)}</div>
+                      {view !== 'requestor' ? (
+                        <div>
+                          <strong>Approval Deadline:</strong> {formatDateTimeCompact(selected.approval_deadline)}
+                          {['approver', 'risk-owner'].includes(view) && isApprovalOverdue(selected) ? (
+                            <span className="badge badge-danger" style={{ marginLeft: '8px', verticalAlign: 'middle' }}>⚠ Overdue</span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {view !== 'approver' ? <div><strong>Approved On:</strong> {formatDateTime(selected.approved_at)}</div> : null}
+                      <div><strong>Requested Active Period:</strong> {getRequestedPeriodDays(selected) ?? '—'} day(s)</div>
+                      <div>
+                        <strong>Current End Date:</strong> {formatDateTimeCompact(selected.exception_end_date)}
+                        {canUpdateEndDate ? (
+                          <button
+                            className="btn btn-secondary"
+                            style={{ width: 'auto', marginLeft: '12px', fontWeight: 'normal' }}
+                            onClick={() => setShowEndDateEditor((current) => !current)}
+                          >
+                            {showEndDateEditor ? 'Cancel' : 'Update End Date'}
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {canUpdateEndDate && showEndDateEditor ? (
+                      <div style={{ marginTop: '10px', padding: '12px', border: '1px solid #e5e7eb', borderRadius: '0.375rem', backgroundColor: '#f9fafb' }}>
+                        <div className="detail-grid">
+                          <div>
+                            <label className="meta">New End Date</label>
+                            <input
+                              type="datetime-local"
+                              value={selectedEndDateInput}
+                              onChange={(event) => {
+                                if (!selected?.id) return
+                                setEndDateInputDrafts((current) => ({
+                                  ...current,
+                                  [selected.id]: event.target.value,
+                                }))
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="meta">Notes <span className="error" style={{ display: 'inline', marginBottom: 0 }}>*</span></label>
+                            <textarea
+                              className="action-notes"
+                              placeholder="Why is the end date changing?"
+                              value={selectedEndDateNotes}
+                              onChange={(event) => {
+                                if (!selected?.id) return
+                                setEndDateNotesDrafts((current) => ({
+                                  ...current,
+                                  [selected.id]: event.target.value,
+                                }))
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+                          <button className="btn" style={{ width: 'auto' }} onClick={updateExceptionEndDate} disabled={updatingEndDate}>
+                            {updatingEndDate ? 'Updating...' : 'Save End Date'}
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ width: 'auto' }}
+                            onClick={() => {
+                              setShowEndDateEditor(false)
+                              setEndDateInputDrafts((current) => {
+                                const next = { ...current }
+                                delete next[selected.id]
+                                return next
+                              })
+                              setEndDateNotesDrafts((current) => {
+                                const next = { ...current }
+                                delete next[selected.id]
+                                return next
+                              })
+                            }}
+                            disabled={updatingEndDate}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                        {endDateUpdateError ? <div className="error" style={{ marginTop: '8px' }}>{endDateUpdateError}</div> : null}
+                      </div>
+                    ) : null}
+
+                    <div className="checkpoint-list" style={{ marginTop: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 'bold' }} onClick={() => setShowEndDateHistory((current) => !current)}>
+                        <span style={{ fontSize: '1.2em', transition: 'transform 0.2s' }}>{showEndDateHistory ? '▼' : '▶'}</span>
+                        <span>End Date Change History ({(selected.end_date_change_history || []).length})</span>
+                      </div>
+
+                      {(selected.end_date_change_history || []).length === 0 ? (
+                        <div className="meta">No end date changes recorded.</div>
+                      ) : null}
+
+                      {showEndDateHistory && (selected.end_date_change_history || []).map((entry, index) => (
+                        <div key={`${entry.timestamp || 'na'}-${index}`} className="checkpoint-item">
+                          <div className="list-card-top">
+                            <span><strong>{entry.performed_by || 'System'}</strong> updated end date</span>
+                            <span className="badge badge-info">change</span>
+                          </div>
+                          <div className="meta">From: {formatDateTimeCompact(entry.previous_end_date)}</div>
+                          <div className="meta">To: {formatDateTimeCompact(entry.new_end_date)}</div>
+                          <div className="meta">When: {formatDateTimeWithSeconds(entry.timestamp)}</div>
+                          {entry.notes ? <div className="meta">Notes: {entry.notes}</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Checkpoints Tab */}
+              <div className="section-block" style={{ marginBottom: '0', borderBottom: '1px solid #e5e7eb', paddingBottom: '0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '12px 0' }} onClick={() => toggleTab('checkpoints')}>
+                  <span style={{ fontSize: '1.2em', transition: 'transform 0.2s', transform: expandedTabs.checkpoints ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                  <strong>Checkpoints</strong>
+                </div>
+                {expandedTabs.checkpoints && (
+                  <div style={{ paddingTop: '12px' }}>
+                    <div className="checkpoint-list">
+                      {(selected.checkpoints || []).map((checkpoint) => (
+                        <div key={checkpoint.checkpoint} className="checkpoint-item">
+                          <div className="list-card-top">
+                            <span>{checkpoint.checkpoint_display}</span>
+                            <span className={`badge badge-${checkpoint.status === 'completed' ? 'success' : checkpoint.status === 'skipped' ? 'muted' : checkpoint.status === 'escalated' ? 'danger' : 'warning'}`}>
+                              {checkpoint.status}
+                            </span>
+                          </div>
+                          <div className="meta">{checkpoint.completed_by_name || 'System / Pending'}</div>
+                          <div className="meta">Timestamp: {formatDateTimeWithSeconds(checkpoint.completed_at)}</div>
+                          {checkpoint.notes ? <div className="meta">{checkpoint.notes}</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Audit Logs Tab */}
+              {canViewAuditLogs ? (
+                <div className="section-block" style={{ marginBottom: '0', borderBottom: '1px solid #e5e7eb', paddingBottom: '0' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '12px 0' }} onClick={() => toggleTab('auditLogs')}>
+                    <span style={{ fontSize: '1.2em', transition: 'transform 0.2s', transform: expandedTabs.auditLogs ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                    <strong>Audit Logs</strong>
+                  </div>
+                  {expandedTabs.auditLogs && (
+                    <div style={{ paddingTop: '12px' }}>
+                      <div className="meta" style={{ marginBottom: '10px' }}>
+                        Full status history for this exception. Security only.
+                      </div>
+
+                      {loadingAuditLogs ? <div className="meta">Loading audit logs...</div> : null}
+                      {!loadingAuditLogs && auditLogsError ? <div className="error">{auditLogsError}</div> : null}
+                      {!loadingAuditLogs && !auditLogsError && auditLogs.length === 0 ? (
+                        <div className="meta">No audit logs recorded yet.</div>
+                      ) : null}
+
+                      <div className="checkpoint-list">
+                        {auditLogs.map((log) => (
+                          <div key={log.id} className="checkpoint-item">
+                            <div className="list-card-top">
+                              <span><strong>{getAuditActionLabel(log.action_type)}</strong></span>
+                              <span className="badge badge-info">audit</span>
+                            </div>
+                            <div className="meta">By: {log.performed_by_name || log.performed_by || 'System'}</div>
+                            <div className="meta">Status: {log.previous_status || '—'} → {log.new_status || '—'}</div>
+                            <div className="meta">When: {formatDateTimeWithSeconds(log.timestamp)}</div>
+                            {getAuditSummary(log).map((line, index) => (
+                              <div key={`${log.id}-summary-${index}`} className="meta">{line}</div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
-              </div>
-
-              {selected.status === 'Rejected' && selected.rejection_feedback ? (
-                <div className="section-block">
-                  <strong>Rejection Feedback</strong>
-                  <p>{selected.rejection_feedback}</p>
-                </div>
               ) : null}
-
-              <div className="section-block">
-                <strong>Description</strong>
-                <p>{selected.short_description}</p>
-              </div>
-
-              <div className="section-block">
-                <strong>Reason for exception</strong>
-                <p>{selected.reason_for_exception}</p>
-              </div>
-
-              <div className="section-block">
-                <strong>Available actions</strong>
-                <div style={{ marginTop: '10px' }}>
-                  <textarea
-                    className="action-notes"
-                    placeholder="Add notes/feedback (mandatory for rejection and High/Critical BU approval)"
-                    value={actionNotes}
-                    onChange={(event) => setActionNotes(event.target.value)}
-                  />
-                </div>
-                <div className="action-row">
-                  {availableActions.length === 0 ? <span className="meta">No actions available for your role in this state.</span> : null}
-                  {availableActions.map(([key, config]) => (
-                    <button key={key} className="btn" style={{ width: 'auto' }} onClick={() => runAction(key)}>
-                      {config.label}
-                    </button>
-                  ))}
-                </div>
-                {actionError ? <div className="error" style={{ marginTop: '12px' }}>{actionError}</div> : null}
-              </div>
-
-              <div className="section-block">
-                <strong>Checkpoints</strong>
-                <div className="checkpoint-list">
-                  {(selected.checkpoints || []).map((checkpoint) => (
-                    <div key={checkpoint.checkpoint} className="checkpoint-item">
-                      <div className="list-card-top">
-                        <span>{checkpoint.checkpoint_display}</span>
-                        <span className={`badge badge-${checkpoint.status === 'completed' ? 'success' : checkpoint.status === 'skipped' ? 'muted' : checkpoint.status === 'escalated' ? 'danger' : 'warning'}`}>
-                          {checkpoint.status}
-                        </span>
-                      </div>
-                      <div className="meta">{checkpoint.completed_by_name || 'System / Pending'}</div>
-                      <div className="meta">Timestamp: {formatDateTimeWithSeconds(checkpoint.completed_at)}</div>
-                      {checkpoint.notes ? <div className="meta">{checkpoint.notes}</div> : null}
-                    </div>
-                  ))}
-                </div>
-              </div>
             </>
           ) : null}
         </section>

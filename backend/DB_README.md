@@ -21,7 +21,7 @@ python manage.py seed_master_data
 python manage.py seed_org_data
 
 # 4. Seed business units, exception types, risk issues
-python manage.py seed_reference_data
+python manage.py seed_extended_data
 
 # 5. Validate schema
 python manage.py validate_db_schema
@@ -306,7 +306,7 @@ Risk Score = AssetType.weight × AssetPurpose.weight × DataClassification.weigh
 
 ### Layer 3: Reference Data
 **When to seed:** Once per environment for demo/testing  
-**Script:** `python manage.py seed_reference_data [--bu-count 3] [--exception-count 5]`  
+**Script:** `python manage.py seed_extended_data [--force]`  
 **Contents:**
 - BusinessUnits (Finance, Operations, IT, etc.)
 - ExceptionTypes (Firewall Exception, Database Access, etc.)
@@ -394,6 +394,7 @@ gunzip backup_20260327_120000.sql.gz && psql -U postgres -h localhost grc_except
 - [ ] Schema matches models: `python manage.py inspectdb` (no unexpected schema drifts)
 - [ ] Master data seeded: Run `seed_master_data`, check counts
 - [ ] Org data seeded: Run `seed_org_data`, verify demo users
+- [ ] Extended reference data seeded: Run `seed_extended_data`, verify BUs/exception types/risk issues
 - [ ] Workflow test: Create/submit/approve/close one exception end-to-end
 - [ ] Scheduler test: Run `python manage.py evaluate_pending_approvals`, verify reminders sent
 - [ ] Backups work: Backup and restore to fresh DB
@@ -424,6 +425,7 @@ python manage.py migrate exceptions zero
 python manage.py migrate exceptions
 python manage.py seed_master_data
 python manage.py seed_org_data
+python manage.py seed_extended_data
 ```
 
 ### Performance Issues

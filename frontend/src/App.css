@@ -44,11 +44,11 @@
 
 .btn {
   width: 100%;
-  border: 1px solid #111;
+  border: 1px solid var(--primary);
   border-radius: 8px;
   padding: 10px 12px;
-  background: #111;
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-contrast);
   cursor: pointer;
 }
 
@@ -59,7 +59,8 @@
 
 .btn-secondary {
   background: #fff;
-  color: #111;
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .shell {
@@ -354,11 +355,11 @@
 }
 
 .notification-dock-button {
-  border: 1px solid #111;
+  border: 1px solid var(--primary);
   border-radius: 999px;
   padding: 10px 14px;
-  background: #111;
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-contrast);
   cursor: pointer;
   font-weight: 600;
   display: inline-flex;
@@ -617,9 +618,6 @@
 
 .btn,
 .notification-dock-button {
-  border-color: var(--primary);
-  background: var(--primary);
-  color: var(--primary-contrast);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-sm);
   transition: transform 0.2s ease, background-color 0.2s ease;

@@ -1,6 +1,10 @@
 from rest_framework.permissions import BasePermission
 
 
+RISK_OWNER_GROUP = "RiskOwner"
+RISK_OWNER_GROUP_NAMES = (RISK_OWNER_GROUP,)
+
+
 class IsRequestor(BasePermission):
     """Allow only the requestor to edit their own exception."""
     
@@ -56,3 +60,7 @@ class CanApproveOrReject(BasePermission):
         is_assigned = obj.assigned_approver == request.user
         is_security = request.user.groups.filter(name="Security").exists()
         return is_assigned or is_security
+
+
+def is_risk_owner_user(user):
+    return user.groups.filter(name__in=RISK_OWNER_GROUP_NAMES).exists()

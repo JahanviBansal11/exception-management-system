@@ -24,7 +24,12 @@ from .serializers import (
     AssetTypeSerializer, AssetPurposeSerializer, DataClassificationSerializer,
     DataComponentSerializer, InternetExposureSerializer, UserBriefSerializer,
 )
-from .permissions import IsAssignedApprover, IsAssignedRequestor, IsSecurity
+from .permissions import (
+    IsAssignedApprover,
+    IsAssignedRequestor,
+    IsSecurity,
+    RISK_OWNER_GROUP_NAMES,
+)
 
 
 def resolve_role_view(user):
@@ -32,7 +37,7 @@ def resolve_role_view(user):
         return "security"
     if user.groups.filter(name="Approver").exists():
         return "approver"
-    if user.groups.filter(name__in=["RiskOwner", "Risk Owner"]).exists():
+    if user.groups.filter(name__in=RISK_OWNER_GROUP_NAMES).exists():
         return "risk-owner"
     if user.groups.filter(name="Requestor").exists():
         return "requestor"
@@ -242,6 +247,53 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             )
         except ValueError as e:
             raise ValidationError(str(e))
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated, IsSecurity])
+    def audit_logs(self, request, pk=None):
+        """Return the audit trail for a single exception request.
+
+        Security team only.
+        """
+        exception = self.get_object()
+
+        raw_limit = request.query_params.get("limit", "50")
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            raise ValidationError({"limit": "limit must be an integer."})
+
+        if limit < 1 or limit > 200:
+            raise ValidationError({"limit": "limit must be between 1 and 200."})
+
+        logs = (
+            AuditLog.objects.filter(exception_request=exception)
+            .select_related("performed_by")
+            .order_by("-timestamp")[:limit]
+        )
+
+        results = []
+        for log in logs:
+            actor = log.performed_by
+            actor_name = None
+            if actor:
+                actor_name = actor.get_full_name() or actor.username
+
+            results.append({
+                "id": log.id,
+                "action_type": log.action_type,
+                "previous_status": log.previous_status,
+                "new_status": log.new_status,
+                "performed_by": actor.username if actor else None,
+                "performed_by_name": actor_name,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "details": log.details or {},
+            })
+
+        return Response({
+            "exception_id": exception.id,
+            "count": len(results),
+            "results": results,
+        })
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
     def bu_reject(self, request, pk=None):
@@ -469,7 +521,7 @@ class ReferenceDataView(APIView):
     def get(self, request):
         active_users = User.objects.filter(is_active=True).order_by('last_name', 'first_name')
         approvers = active_users.filter(groups__name='Approver').distinct()
-        risk_owners = active_users.filter(groups__name__in=['RiskOwner', 'Risk Owner']).distinct()
+        risk_owners = active_users.filter(groups__name__in=RISK_OWNER_GROUP_NAMES).distinct()
 
         return Response({
             "business_units":      BusinessUnitSerializer(BusinessUnit.objects.select_related('cio').all(), many=True).data,
@@ -575,7 +627,7 @@ class WorklistNotificationsView(APIView):
         reminder_logs = reminder_logs.select_related("exception_request", "sent_to").order_by("-sent_at")[:20]
 
         for log in reminder_logs:
-            message = f"{log.reminder_type} for Exception #{log.exception_request_id}"
+            message = f"Exception #{log.exception_request_id}: {log.reminder_type}"
             title = f"Reminder {log.delivery_status}"
             if (log.message_content or "").startswith("ACTIVE_EXPIRY:"):
                 marker = (log.message_content or "").split("\n", 1)[0]
@@ -634,7 +686,9 @@ class WorklistNotificationsView(APIView):
                 message = details.get("message")
                 if not message:
                     status_text = log.new_status or log.action_type
-                    message = f"{actor_label} changed your request to {status_text}."
+                    message = f"Exception #{log.exception_request_id}: {actor_label} changed request to {status_text}."
+                else:
+                    message = f"Exception #{log.exception_request_id}: {message}"
 
                 if feedback:
                     message = f"{message} Feedback: {feedback}"
@@ -780,3 +834,198 @@ class SecurityUserDetailView(APIView):
         user.save()
 
         return Response({"message": "User updated successfully."})
+
+
+class SecurityAuditTrailView(APIView):
+    """Security-only endpoint to view complete audit trail across all exceptions."""
+    permission_classes = [IsAuthenticated, IsSecurity]
+
+    def get(self, request):
+        """
+        Returns paginated audit logs with optional filtering.
+        Query params:
+        - exception_id: Filter by specific exception
+        - action_type: Filter by action (SUBMIT, APPROVE, REJECT, CLOSE, EXPIRE, REMIND, ESCALATE, UPDATE)
+        - performed_by: Filter by username who performed action
+        - limit: Default 50, max 200
+        - offset: For pagination
+        - start_date: ISO format datetime (inclusive)
+        - end_date: ISO format datetime (inclusive)
+        """
+        exception_id = request.query_params.get("exception_id")
+        action_type = request.query_params.get("action_type")
+        performed_by = request.query_params.get("performed_by")
+        
+        raw_limit = request.query_params.get("limit", "50")
+        raw_offset = request.query_params.get("offset", "0")
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+
+        try:
+            limit = int(raw_limit)
+            offset = int(raw_offset)
+        except (TypeError, ValueError):
+            raise ValidationError({"error": "limit and offset must be integers."})
+
+        if limit < 1 or limit > 200:
+            raise ValidationError({"limit": "limit must be between 1 and 200."})
+        if offset < 0:
+            raise ValidationError({"offset": "offset must be >= 0."})
+
+        logs_qs = AuditLog.objects.select_related("exception_request", "performed_by").order_by("-timestamp")
+
+        if exception_id:
+            try:
+                exc_id = int(exception_id)
+                logs_qs = logs_qs.filter(exception_request_id=exc_id)
+            except (TypeError, ValueError):
+                raise ValidationError({"exception_id": "exception_id must be an integer."})
+
+        if action_type:
+            valid_actions = [choice[0] for choice in AuditLog.ACTION_CHOICES]
+            if action_type not in valid_actions:
+                raise ValidationError({"action_type": f"action_type must be one of {valid_actions}."})
+            logs_qs = logs_qs.filter(action_type=action_type)
+
+        if performed_by:
+            logs_qs = logs_qs.filter(performed_by__username=performed_by)
+
+        if start_date:
+            try:
+                from datetime import datetime
+                start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                logs_qs = logs_qs.filter(timestamp__gte=start)
+            except (ValueError, AttributeError):
+                raise ValidationError({"start_date": "start_date must be ISO format."})
+
+        if end_date:
+            try:
+                from datetime import datetime
+                end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                logs_qs = logs_qs.filter(timestamp__lte=end)
+            except (ValueError, AttributeError):
+                raise ValidationError({"end_date": "end_date must be ISO format."})
+
+        total_count = logs_qs.count()
+        logs = logs_qs[offset : offset + limit]
+
+        results = []
+        for log in logs:
+            actor = log.performed_by
+            actor_name = None
+            if actor:
+                actor_name = actor.get_full_name() or actor.username
+
+            results.append({
+                "id": log.id,
+                "exception_id": log.exception_request_id,
+                "exception_short_description": log.exception_request.short_description if log.exception_request else None,
+                "action_type": log.action_type,
+                "previous_status": log.previous_status,
+                "new_status": log.new_status,
+                "performed_by": actor.username if actor else None,
+                "performed_by_name": actor_name,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "details": log.details or {},
+            })
+
+        return Response({
+            "count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "results": results,
+        })
+
+
+class SecurityAuditListView(APIView):
+    """Security-only endpoint to view exceptions with their last audit action for master audit list."""
+    permission_classes = [IsAuthenticated, IsSecurity]
+
+    def get(self, request):
+        """
+        Returns paginated list of exceptions with last audit action summary.
+        Query params:
+        - sort_by: latest (default), oldest, id_asc, id_desc, status_asc, status_desc, risk_asc, risk_desc
+        - limit: Default 25, max 200
+        - offset: For pagination
+        """
+        from django.db.models import Prefetch
+        
+        sort_by = request.query_params.get("sort_by", "latest")
+        raw_limit = request.query_params.get("limit", "25")
+        raw_offset = request.query_params.get("offset", "0")
+
+        try:
+            limit = int(raw_limit)
+            offset = int(raw_offset)
+        except (TypeError, ValueError):
+            raise ValidationError({"error": "limit and offset must be integers."})
+
+        if limit < 1 or limit > 200:
+            raise ValidationError({"limit": "limit must be between 1 and 200."})
+        if offset < 0:
+            raise ValidationError({"offset": "offset must be >= 0."})
+
+        # Use Prefetch with explicit ordering to ensure we get the MOST RECENT audit log
+        audit_prefetch = Prefetch(
+            'audit_logs',
+            queryset=AuditLog.objects.select_related('performed_by').order_by('-timestamp')
+        )
+        
+        # Get all exceptions with properly ordered audit logs
+        exceptions_qs = ExceptionRequest.objects.prefetch_related(audit_prefetch).order_by("-id")
+
+        # Apply sorting
+        if sort_by == "latest":
+            exceptions_qs = exceptions_qs.order_by("-id")
+        elif sort_by == "oldest":
+            exceptions_qs = exceptions_qs.order_by("id")
+        elif sort_by == "id_asc":
+            exceptions_qs = exceptions_qs.order_by("id")
+        elif sort_by == "id_desc":
+            exceptions_qs = exceptions_qs.order_by("-id")
+        elif sort_by == "status_asc":
+            exceptions_qs = exceptions_qs.order_by("status", "-id")
+        elif sort_by == "status_desc":
+            exceptions_qs = exceptions_qs.order_by("-status", "-id")
+        elif sort_by == "risk_asc":
+            exceptions_qs = exceptions_qs.order_by("risk_rating", "-id")
+        elif sort_by == "risk_desc":
+            exceptions_qs = exceptions_qs.order_by("-risk_rating", "-id")
+
+        total_count = exceptions_qs.count()
+        exceptions = exceptions_qs[offset : offset + limit]
+
+        results = []
+        for exc in exceptions:
+            # Get last audit log (first in -timestamp order, which is most recent)
+            last_audit = exc.audit_logs.all()[0] if exc.audit_logs.exists() else None
+
+            actor_name = None
+            last_action = None
+            last_timestamp = None
+            
+            if last_audit:
+                last_action = last_audit.action_type
+                last_timestamp = last_audit.timestamp.isoformat() if last_audit.timestamp else None
+                
+                # Ensure performed_by is properly retrieved
+                if last_audit.performed_by:
+                    actor_name = last_audit.performed_by.get_full_name() or last_audit.performed_by.username
+
+            results.append({
+                "id": exc.id,
+                "short_description": exc.short_description,
+                "status": exc.status,
+                "risk_rating": exc.risk_rating,
+                "last_action": last_action,
+                "performed_by": actor_name,
+                "last_audit_timestamp": last_timestamp,
+            })
+
+        return Response({
+            "count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "results": results,
+        })

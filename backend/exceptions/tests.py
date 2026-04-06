@@ -31,7 +31,7 @@ class OptionBWorkflowTests(TestCase):
 
         requestor_group, _ = Group.objects.get_or_create(name='Requestor')
         approver_group, _ = Group.objects.get_or_create(name='Approver')
-        risk_owner_group, _ = Group.objects.get_or_create(name='Risk Owner')
+        risk_owner_group, _ = Group.objects.get_or_create(name='RiskOwner')
         Group.objects.get_or_create(name='Security')
 
         cls.requestor.groups.add(requestor_group)
@@ -229,3 +229,4 @@ class OptionBWorkflowTests(TestCase):
         me_response = client.get('/api/auth/me/')
         self.assertEqual(me_response.status_code, 200)
         self.assertEqual(me_response.data['username'], 'test_requestor')
+

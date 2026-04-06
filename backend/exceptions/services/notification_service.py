@@ -212,12 +212,13 @@ class NotificationService:
             return False
     
     @staticmethod
-    def send_exception_approved_notification(exception_request: ExceptionRequest) -> bool:
+    def send_exception_approved_notification(exception_request: ExceptionRequest, approved_by_user=None) -> bool:
         """
         Notify requester that their exception was approved.
         
         Args:
             exception_request: The approved exception
+            approved_by_user: User who approved (e.g., BU CIO or Risk Owner). If None, will be determined from latest audit log.
         
         Returns:
             True if sent successfully, False otherwise
@@ -225,11 +226,32 @@ class NotificationService:
         try:
             requester = exception_request.requested_by
             
+            # Determine who approved if not provided
+            if approved_by_user is None:
+                last_audit = AuditLog.objects.filter(
+                    exception_request=exception_request,
+                    action_type='APPROVE'
+                ).select_related('performed_by').order_by('-timestamp').first()
+                if last_audit:
+                    approved_by_user = last_audit.performed_by
+            
+            approver_name = None
+            approver_role = None
+            if approved_by_user:
+                approver_name = approved_by_user.get_full_name() or approved_by_user.username
+                # Determine role based on exception's assigned_approver or risk_owner
+                if approved_by_user.id == exception_request.assigned_approver_id:
+                    approver_role = "BU CIO"
+                elif approved_by_user.id == exception_request.risk_owner_id:
+                    approver_role = "Risk Owner"
+            
             context = {
                 'exception': exception_request,
                 'requester': requester,
                 'approved_at': exception_request.approved_at,
                 'validity_end': exception_request.exception_end_date,
+                'approver_name': approver_name,
+                'approver_role': approver_role or 'System',
             }
             
             html_message = NotificationService._render_approval_notification_template(context)
@@ -418,11 +440,12 @@ class NotificationService:
         template = """
         <h2>Exception Approved</h2>
         <p>Hello {{ requester.first_name }},</p>
-        <p>Your exception has been approved!</p>
+        <p>Your exception has been approved by {{ approver_role }}{% if approver_name %} ({{ approver_name }}){% endif %}!</p>
         
         <div style="border: 1px solid #ddd; padding: 15px; margin: 20px 0;">
             <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
             <p><strong>Description:</strong> {{ exception.short_description }}</p>
+            <p><strong>Approved By:</strong> {{ approver_role }}{% if approver_name %} - {{ approver_name }}{% endif %}</p>
             <p><strong>Approved At:</strong> {{ approved_at|date:"M d, Y H:i" }}</p>
             <p><strong>Valid Until:</strong> {{ validity_end|date:"M d, Y" }}</p>
         </div>

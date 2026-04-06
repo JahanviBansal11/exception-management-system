@@ -4,7 +4,10 @@ from .models import (
     ExceptionType,
     RiskIssue,
     AssetType,
+    AssetPurpose,
     DataClassification,
+    DataComponent,
+    InternetExposure,
     ExceptionRequest,
     ExceptionCheckpoint,
     AuditLog,
@@ -35,9 +38,27 @@ class AssetTypeAdmin(admin.ModelAdmin):
     list_display = ("name",)
 
 
+@admin.register(AssetPurpose)
+class AssetPurposeAdmin(admin.ModelAdmin):
+    list_display = ("name", "weight")
+    search_fields = ("name",)
+
+
 @admin.register(DataClassification)
 class DataClassificationAdmin(admin.ModelAdmin):
     list_display = ("level", "weight")
+
+
+@admin.register(DataComponent)
+class DataComponentAdmin(admin.ModelAdmin):
+    list_display = ("name", "weight")
+    search_fields = ("name",)
+
+
+@admin.register(InternetExposure)
+class InternetExposureAdmin(admin.ModelAdmin):
+    list_display = ("label", "weight")
+    search_fields = ("label",)
 
 
 @admin.register(ExceptionRequest)

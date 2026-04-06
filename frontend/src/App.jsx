@@ -4,6 +4,7 @@ import { useAuth } from './useAuth.js'
 import LoginPage from './LoginPage.jsx'
 import DashboardPage from './DashboardPage.jsx'
 import CreateExceptionPage from './CreateExceptionPage.jsx'
+import AuditLogPage from './AuditLogPage.jsx'
 
 function getDashboardViewForUser(user) {
   const groups = user?.groups || []
@@ -91,6 +92,14 @@ function App() {
         element={
           <ProtectedRoute>
             <CreateExceptionPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/audit-log"
+        element={
+          <ProtectedRoute>
+            <AuditLogPage />
           </ProtectedRoute>
         }
       />

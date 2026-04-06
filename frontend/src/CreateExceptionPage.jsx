@@ -44,11 +44,41 @@ function RequiredMark() {
   return <span className="ml-1 text-red-600">*</span>
 }
 
-function getMinDateTimeLocal() {
+function parseDdMmYyyyToDate(value) {
+  if (!value || typeof value !== 'string') return null
+  const match = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (!match) return null
+
+  const day = Number(match[1])
+  const month = Number(match[2])
+  const year = Number(match[3])
+  const parsed = new Date(year, month - 1, day, 0, 0, 0, 0)
+
+  if (
+    Number.isNaN(parsed.getTime()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null
+  }
+
+  return parsed
+}
+
+function isFutureCalendarDate(value) {
+  const parsed = parseDdMmYyyyToDate(value)
+  if (!parsed) return false
+
   const now = new Date()
-  now.setSeconds(0, 0)
-  const timezoneOffset = now.getTimezoneOffset() * 60000
-  return new Date(now.getTime() - timezoneOffset).toISOString().slice(0, 16)
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
+  return parsed.getTime() > today.getTime()
+}
+
+function toDdMmYyyy(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`
 }
 
 const FIELD_LABELS = {
@@ -72,7 +102,7 @@ const FIELD_FIX_HELP = {
   business_unit: 'Select a business unit from the dropdown.',
   exception_type: 'Select an exception type.',
   risk_issue: 'Select the related risk/issue.',
-  exception_end_date: 'Pick a future date and time.',
+  exception_end_date: 'Use DD/MM/YYYY and choose a future date.',
   short_description: 'Enter at least 10 characters.',
   reason_for_exception: 'Enter at least 20 characters explaining the reason.',
   asset_type: 'Select an asset type.',
@@ -99,7 +129,11 @@ const schema = z.object({
   short_description:    z.string().min(10, 'Minimum 10 characters'),
   reason_for_exception: z.string().min(20, 'Minimum 20 characters'),
   compensatory_controls:z.string().optional(),
-  exception_end_date:   z.string().min(1, 'Required'),
+  exception_end_date:   z
+    .string()
+    .min(1, 'Required')
+    .refine((value) => parseDdMmYyyyToDate(value) !== null, 'Use format DD/MM/YYYY')
+    .refine((value) => isFutureCalendarDate(value), 'Date must be in the future'),
   assigned_approver:    z.string().min(1, 'Required'),
   risk_owner:           z.string().min(1, 'Required'),
 })
@@ -119,6 +153,21 @@ function FormSection({ title, description, children }) {
       </CardContent>
     </Card>
   )
+}
+
+function normalizeSavedDraft(draft) {
+  if (!draft || typeof draft !== 'object') return draft
+  const value = draft.exception_end_date
+  if (!value || typeof value !== 'string') return draft
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(value.trim())) return draft
+
+  const normalized = toDdMmYyyy(value)
+  if (!normalized) return draft
+
+  return {
+    ...draft,
+    exception_end_date: normalized,
+  }
 }
 
 // ─── Reusable Select field ────────────────────────────────────────────────────
@@ -163,7 +212,7 @@ export default function CreateExceptionPage() {
   const [submitError, setSubmitError] = useState(null)
   const [loadingApprover, setLoadingApprover] = useState(false)
 
-  const savedDraft = getSavedDraft()
+  const savedDraft = normalizeSavedDraft(getSavedDraft())
 
   const form = useForm({
     resolver: zodResolver(schema),
@@ -217,6 +266,13 @@ export default function CreateExceptionPage() {
   async function onSubmit(values) {
     setSubmitError(null)
     try {
+      const parsedEndDate = parseDdMmYyyyToDate(values.exception_end_date)
+      if (!parsedEndDate) {
+        form.setError('exception_end_date', { message: 'Use format DD/MM/YYYY' })
+        setSubmitError('Please fix the errors above.')
+        return
+      }
+
       // Convert string IDs from Select back to numbers for the API
       const payload = {
         ...values,
@@ -230,8 +286,8 @@ export default function CreateExceptionPage() {
         assigned_approver:   parseInt(values.assigned_approver),
         risk_owner:          parseInt(values.risk_owner),
         // data_components is already an array of numbers
-        // exception_end_date: datetime-local string → ISO
-        exception_end_date: new Date(values.exception_end_date).toISOString(),
+        // exception_end_date: DD/MM/YYYY string → ISO
+        exception_end_date: parsedEndDate.toISOString(),
       }
       await api.post('/api/exceptions/', payload)
       window.localStorage.removeItem(DRAFT_STORAGE_KEY)
@@ -349,12 +405,14 @@ export default function CreateExceptionPage() {
                     <FormLabel className={fieldState.error ? 'text-red-600' : ''}>Exception End Date<RequiredMark /></FormLabel>
                     <FormControl>
                       <Input
-                        type="datetime-local"
-                        min={getMinDateTimeLocal()}
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="DD/MM/YYYY"
                         className={fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''}
                         {...field}
                       />
                     </FormControl>
+                    <FormDescription>Format: DD/MM/YYYY (future date only)</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

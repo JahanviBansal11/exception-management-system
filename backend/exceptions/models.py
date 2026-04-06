@@ -479,7 +479,7 @@ class ExceptionRequest(models.Model):
         
         # Send approval notification to requester (auto-approved for Low/Medium risk)
         from exceptions.services.notification_service import NotificationService
-        NotificationService.send_exception_approved_notification(self)
+        NotificationService.send_exception_approved_notification(self, approved_by_user=user)
 
     def risk_approve(self, user, notes=''):
         """Risk owner approves a High/Critical exception."""
@@ -507,7 +507,7 @@ class ExceptionRequest(models.Model):
         
         # Send approval notification to requester
         from exceptions.services.notification_service import NotificationService
-        NotificationService.send_exception_approved_notification(self)
+        NotificationService.send_exception_approved_notification(self, approved_by_user=user)
 
     def risk_assess_complete(self, user, notes=''):
         """Backward-compatible alias for risk owner approval."""

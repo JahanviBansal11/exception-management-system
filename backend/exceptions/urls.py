@@ -7,6 +7,8 @@ from .views import (
     WorklistNotificationsView,
     SecurityUsersView,
     SecurityUserDetailView,
+    SecurityAuditTrailView,
+    SecurityAuditListView,
 )
 
 router = DefaultRouter()
@@ -18,4 +20,6 @@ urlpatterns = router.urls + [
     path('worklist/notifications/', WorklistNotificationsView.as_view(), name='worklist_notifications'),
     path('security/users/', SecurityUsersView.as_view(), name='security_users'),
     path('security/users/<int:user_id>/', SecurityUserDetailView.as_view(), name='security_user_detail'),
+    path('security/audit-list/', SecurityAuditListView.as_view(), name='security_audit_list'),
+    path('security/audit-trail/', SecurityAuditTrailView.as_view(), name='security_audit_trail'),
 ]

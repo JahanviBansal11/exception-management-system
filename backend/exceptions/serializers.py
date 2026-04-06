@@ -7,6 +7,7 @@ from .models import (
     AssetType, AssetPurpose, DataClassification,
     DataComponent, InternetExposure,
 )
+from .permissions import RISK_OWNER_GROUP_NAMES
 
 
 class CheckpointSerializer(serializers.ModelSerializer):
@@ -36,6 +37,9 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
     submitted_at = serializers.SerializerMethodField()
     rejection_feedback = serializers.SerializerMethodField()
     end_date_change_history = serializers.SerializerMethodField()
+    requested_by_username = serializers.SerializerMethodField()
+    assigned_approver_username = serializers.SerializerMethodField()
+    risk_owner_username = serializers.SerializerMethodField()
 
     class Meta:
         model = ExceptionRequest
@@ -64,8 +68,11 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
             "reminder_stage",
             "status",
             "requested_by",
+            "requested_by_username",
             "assigned_approver",
+            "assigned_approver_username",
             "risk_owner",
+            "risk_owner_username",
             "version",
             "checkpoints",
             "submitted_at",
@@ -141,6 +148,15 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
             })
         return result
 
+    def get_requested_by_username(self, obj):
+        return obj.requested_by.username if obj.requested_by else None
+
+    def get_assigned_approver_username(self, obj):
+        return obj.assigned_approver.username if obj.assigned_approver else None
+
+    def get_risk_owner_username(self, obj):
+        return obj.risk_owner.username if obj.risk_owner else None
+
     def validate_exception_end_date(self, value):
         """Ensure exception validity period is in the future."""
         if not value:
@@ -168,7 +184,7 @@ class ExceptionRequestSerializer(serializers.ModelSerializer):
         if not value.is_active:
             raise serializers.ValidationError("Selected risk owner is inactive.")
 
-        if not value.groups.filter(name__in=['RiskOwner', 'Risk Owner']).exists():
+        if not value.groups.filter(name__in=RISK_OWNER_GROUP_NAMES).exists():
             raise serializers.ValidationError(
                 "Selected user must belong to the RiskOwner group."
             )

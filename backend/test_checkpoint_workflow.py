@@ -47,7 +47,7 @@ def setup_test_data():
 
     requestor_group, _ = Group.objects.get_or_create(name='Requestor')
     approver_group, _ = Group.objects.get_or_create(name='Approver')
-    risk_owner_group, _ = Group.objects.get_or_create(name='Risk Owner')
+    risk_owner_group, _ = Group.objects.get_or_create(name='RiskOwner')
     Group.objects.get_or_create(name='Security')
 
     requestor.groups.add(requestor_group)
