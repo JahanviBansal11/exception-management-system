@@ -149,7 +149,7 @@ class ExceptionRequest(models.Model):
         "Draft": ["Submitted"],
         "Submitted": ["AwaitingRiskOwner", "Approved", "Rejected", "Expired"],
         "AwaitingRiskOwner": ["Approved", "Rejected", "Expired"],
-        "Approved": ["Closed"],
+        "Approved": ["Closed", "Submitted"],
         "Rejected": ["Draft"],
         "Expired": ["Draft"],
         "Closed": [],
@@ -364,10 +364,20 @@ class ExceptionRequest(models.Model):
                 self.approval_deadline = timezone.now() + timedelta(
                     days=self.exception_type.approval_sla_days
                 )
+                self.approved_at = None
+                self.reminder_stage = "None"
+                self.last_reminder_sent = None
             elif new_status == "Approved":
                 self.approved_at = timezone.now()
             
-            self.save(update_fields=["status", "updated_at", "approval_deadline", "approved_at"])
+            self.save(update_fields=[
+                "status",
+                "updated_at",
+                "approval_deadline",
+                "approved_at",
+                "reminder_stage",
+                "last_reminder_sent",
+            ])
 
             # Create immutable audit log
             AuditLog.objects.create(
@@ -384,6 +394,7 @@ class ExceptionRequest(models.Model):
         if self.status != "Draft":
             raise ValueError("Only Draft exceptions can be submitted.")
         self._change_status("Submitted", user, "SUBMIT")
+        self.checkpoints.all().delete()
         self._record_checkpoint(
             checkpoint='exception_requested',
             status='completed',
@@ -397,6 +408,48 @@ class ExceptionRequest(models.Model):
         )
         
         # Send notification to assigned approver
+        from exceptions.services.notification_service import NotificationService
+        NotificationService.send_submission_notification(self)
+
+    def submit_renewal(self, user, new_end_date, notes=''):
+        """Submit approved exception back into approval workflow as a renewal request."""
+        if self.status != "Approved":
+            raise ValueError("Only Approved exceptions can be renewed.")
+
+        renewal_notes = (notes or '').strip()
+        if not renewal_notes:
+            raise ValueError("Notes are required when renewing an exception.")
+
+        previous_end_date = self.exception_end_date
+        self.exception_end_date = new_end_date
+
+        self._change_status(
+            "Submitted",
+            user,
+            "SUBMIT",
+            details={
+                "message": "Renewal submitted for approval.",
+                "renewal": True,
+                "end_date_change": True,
+                "previous_end_date": previous_end_date.isoformat() if previous_end_date else None,
+                "new_end_date": new_end_date.isoformat() if new_end_date else None,
+                "notes": renewal_notes,
+            },
+        )
+
+        self.checkpoints.all().delete()
+        self._record_checkpoint(
+            checkpoint='exception_requested',
+            status='completed',
+            user=user,
+            notes='Renewal submitted by requestor'
+        )
+        self._record_checkpoint(
+            checkpoint='bu_approval_notified',
+            status='pending',
+            notes='Awaiting BU CIO decision for renewal'
+        )
+
         from exceptions.services.notification_service import NotificationService
         NotificationService.send_submission_notification(self)
 
@@ -824,7 +877,7 @@ class ReminderLog(models.Model):
     sent_at = models.DateTimeField(auto_now_add=True, db_index=True)
     delivery_status = models.CharField(
         max_length=20,
-        choices=[('sent', 'Sent'), ('failed', 'Failed'), ('bounced', 'Bounced')],
+        choices=[('queued', 'Queued'), ('sent', 'Sent'), ('failed', 'Failed'), ('bounced', 'Bounced')],
         default='sent'
     )
     
@@ -839,3 +892,31 @@ class ReminderLog(models.Model):
 
     def __str__(self):
         return f"{self.exception_request.id} - {self.reminder_type} ({self.delivery_status})"
+
+
+class NotificationDismissal(models.Model):
+    """Store notification dismissals per user for cross-device persistence."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='dismissed_notifications',
+    )
+    event_key = models.CharField(max_length=255)
+    dismissed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-dismissed_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'event_key'],
+                name='unique_user_notification_dismissal',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['user', 'dismissed_at'], name='notif_dismiss_user_ts_idx'),
+            models.Index(fields=['user', 'event_key'], name='notif_dismiss_user_key_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} - {self.event_key}"

@@ -82,6 +82,40 @@ python test_checkpoint_workflow.py
 
 **Expected result:** All green ✅, no errors
 
+### 2a. **For Async Notifications (Industry Setup):**
+
+Use Redis + Celery when you want real background processing for reminders and notification emails:
+
+```bash
+# 1. Start Redis
+redis-server
+
+# 2. Start Celery worker
+celery -A grc_backend worker -l info
+
+# 3. Start Celery beat (reminders/escalations)
+celery -A grc_backend beat -l info
+```
+
+Required environment values:
+
+```bash
+CELERY_TASK_ALWAYS_EAGER=False
+CELERY_TASK_EAGER_PROPAGATES=True
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```
+
+### 2b. **For Local Development Without Redis:**
+
+If you are only testing the API/UI locally, you can run Celery in eager mode:
+
+```bash
+CELERY_TASK_ALWAYS_EAGER=True
+```
+
+This keeps action-triggered emails synchronous in the Django process, but periodic reminders will not run unless you execute the reminder jobs manually or use a scheduler.
+
 ---
 
 ### 3. **For Code Review:**

@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from datetime import timedelta
 from django.contrib.auth.models import User, Group
 from django.db.models import Q
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -14,6 +15,7 @@ from .models import (
     ExceptionRequest,
     AuditLog,
     ReminderLog,
+    NotificationDismissal,
     BusinessUnit, ExceptionType, RiskIssue,
     AssetType, AssetPurpose, DataClassification,
     DataComponent, InternetExposure,
@@ -66,6 +68,17 @@ def get_visible_exceptions_for_user(user):
 
 def is_security_user(user):
     return user.groups.filter(name="Security").exists() or user.is_superuser or user.is_staff
+
+
+def build_notification_event_key(item):
+    parts = [
+        str(item.get("event_type") or "na"),
+        str(item.get("exception_id") or "na"),
+        str(item.get("timestamp") or "na"),
+        str(item.get("title") or "na"),
+        str(item.get("message") or "na"),
+    ]
+    return "|".join(parts)
 
 
 class ExceptionRequestViewSet(viewsets.ModelViewSet):
@@ -481,8 +494,12 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             raise ValidationError({"exception_end_date": "Invalid datetime format."})
         if timezone.is_naive(new_end_date):
             new_end_date = timezone.make_aware(new_end_date, timezone.get_current_timezone())
-        if new_end_date <= timezone.now():
-            raise ValidationError({"exception_end_date": "End date must be in the future."})
+
+        approval_anchor = exception.approved_at or exception.created_at
+        if new_end_date <= approval_anchor:
+            raise ValidationError({
+                "exception_end_date": "End date must be later than the approval reception date."
+            })
 
         notes = (request.data.get("notes") or "").strip()
         if not notes:
@@ -508,8 +525,68 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             },
         )
 
+        from exceptions.services.notification_service import NotificationService
+        NotificationService.send_exception_end_date_updated_notification(
+            exception_request=exception,
+            previous_end_date=previous_end_date,
+            new_end_date=new_end_date,
+            updated_by=request.user,
+            notes=notes,
+        )
+
         return Response({
             "message": "Exception end date updated successfully.",
+            "new_end_date": new_end_date.isoformat(),
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def renew(self, request, pk=None):
+        """Submit an approved exception renewal into the approval workflow."""
+        exception = self.get_object()
+
+        if exception.requested_by != request.user:
+            raise PermissionDenied("Only the original requestor can submit a renewal.")
+
+        if exception.status != "Approved":
+            raise ValidationError("Only Approved exceptions can be renewed.")
+
+        current_end_date = exception.exception_end_date
+        if not current_end_date:
+            raise ValidationError("This exception has no active end date to renew.")
+
+        active_start = exception.approved_at or exception.created_at
+        total_window_seconds = (current_end_date - active_start).total_seconds()
+        elapsed_seconds = (timezone.now() - active_start).total_seconds()
+        if total_window_seconds <= 0:
+            raise ValidationError("This exception has an invalid active period and cannot be renewed.")
+        if (elapsed_seconds / total_window_seconds) < 0.5:
+            raise ValidationError("Renewal is available only after 50% of the approved period has elapsed.")
+
+        end_date_raw = request.data.get("exception_end_date")
+        if not end_date_raw:
+            raise ValidationError({"exception_end_date": "This field is required."})
+
+        new_end_date = parse_datetime(str(end_date_raw))
+        if new_end_date is None:
+            raise ValidationError({"exception_end_date": "Invalid datetime format."})
+        if timezone.is_naive(new_end_date):
+            new_end_date = timezone.make_aware(new_end_date, timezone.get_current_timezone())
+        if new_end_date <= timezone.now():
+            raise ValidationError({"exception_end_date": "End date must be in the future."})
+        if new_end_date <= current_end_date:
+            raise ValidationError({"exception_end_date": "Renewal end date must be later than current end date."})
+
+        notes = (request.data.get("notes") or "").strip()
+        if not notes:
+            raise ValidationError({"notes": "Notes are required when renewing an exception."})
+
+        try:
+            exception.submit_renewal(request.user, new_end_date, notes=notes)
+        except ValueError as exc:
+            raise ValidationError(str(exc))
+
+        return Response({
+            "message": "Renewal submitted successfully.",
             "new_end_date": new_end_date.isoformat(),
         }, status=status.HTTP_200_OK)
 
@@ -581,6 +658,12 @@ class WorklistNotificationsView(APIView):
         user = request.user
         now = timezone.now()
         soon_window = now + timedelta(hours=24)
+        try:
+            dismissed_keys = set(
+                NotificationDismissal.objects.filter(user=user).values_list("event_key", flat=True)
+            )
+        except (OperationalError, ProgrammingError):
+            dismissed_keys = set()
 
         visible, view = get_visible_exceptions_for_user(user)
 
@@ -635,9 +718,20 @@ class WorklistNotificationsView(APIView):
                 message = f"Exception #{log.exception_request_id} reached active reminder stage {stage}."
                 title = "Active exception expiry reminder"
 
+            if log.delivery_status == 'sent':
+                event_type = 'reminder_sent'
+                severity = 'info'
+            elif log.delivery_status == 'queued':
+                event_type = 'reminder_queued'
+                severity = 'info'
+                title = 'Reminder queued'
+            else:
+                event_type = 'reminder_failed'
+                severity = 'danger'
+
             events.append({
-                "event_type": "reminder_sent" if log.delivery_status == "sent" else "reminder_failed",
-                "severity": "info" if log.delivery_status == "sent" else "danger",
+                "event_type": event_type,
+                "severity": severity,
                 "title": title,
                 "message": message,
                 "exception_id": log.exception_request_id,
@@ -707,16 +801,41 @@ class WorklistNotificationsView(APIView):
         events.sort(key=lambda item: item["timestamp"] or now, reverse=True)
 
         response_items = []
-        for item in events[:25]:
+        for item in events:
+            event_key = build_notification_event_key(item)
+            if event_key in dismissed_keys:
+                continue
+
             response_items.append({
                 **item,
+                "event_key": event_key,
                 "timestamp": item["timestamp"].isoformat() if item["timestamp"] else None,
             })
+
+            if len(response_items) >= 25:
+                break
 
         return Response({
             "view": view,
             "items": response_items,
         })
+
+
+class WorklistNotificationDismissView(APIView):
+    """Persist dismissed notification keys for each user."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        event_key = (request.data.get("event_key") or "").strip()
+        if not event_key:
+            raise ValidationError({"event_key": "event_key is required."})
+
+        NotificationDismissal.objects.get_or_create(
+            user=request.user,
+            event_key=event_key,
+        )
+
+        return Response({"dismissed": True}, status=status.HTTP_200_OK)
 
 
 class SecurityUsersView(APIView):

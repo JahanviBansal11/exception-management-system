@@ -23,9 +23,10 @@ from exceptions.services.reminder_engine import ReminderEngine
 class OptionBWorkflowTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        cls.requestor = User.objects.create_user('test_requestor', 'req@test.com', 'pass123')
-        cls.approver = User.objects.create_user('test_approver', 'app@test.com', 'pass123')
-        cls.risk_owner = User.objects.create_user('test_riskowner', 'risk@test.com', 'pass123')
+        cls.requestor = User.objects.create_user('test_requestor', 'jahanvibsl@gmail.com', 'pass123')
+        cls.approver = User.objects.create_user('test_approver', 'jahanvibsl@gmail.com', 'pass123')
+        cls.risk_owner = User.objects.create_user('test_riskowner', 'jahanvibsl@gmail.com', 'pass123')
+        cls.security_user = User.objects.create_user('test_security', 'sec@test.com', 'pass123')
         cls.outsider = User.objects.create_user('test_outsider', 'out@test.com', 'pass123')
         User.objects.get_or_create(username='system', defaults={'email': 'system@test.com'})
 
@@ -37,6 +38,7 @@ class OptionBWorkflowTests(TestCase):
         cls.requestor.groups.add(requestor_group)
         cls.approver.groups.add(approver_group)
         cls.risk_owner.groups.add(risk_owner_group)
+        cls.security_user.groups.add(Group.objects.get(name='Security'))
 
         cls.bu, _ = BusinessUnit.objects.get_or_create(
             bu_code='FIN',
@@ -199,7 +201,8 @@ class OptionBWorkflowTests(TestCase):
         escalated_count = EscalationEngine.escalate_expired_approvals()
         expired_exc.refresh_from_db()
         self.assertGreaterEqual(escalated_count, 1)
-        self.assertEqual(expired_exc.status, 'Expired')
+        self.assertEqual(expired_exc.status, 'Submitted')
+        self.assertEqual(expired_exc.reminder_stage, 'Expired_Notice')
 
         close_exc = self.create_exception(profile='low', suffix='auto-close')
         close_exc.submit(self.requestor)
@@ -229,4 +232,45 @@ class OptionBWorkflowTests(TestCase):
         me_response = client.get('/api/auth/me/')
         self.assertEqual(me_response.status_code, 200)
         self.assertEqual(me_response.data['username'], 'test_requestor')
+
+    @patch('exceptions.services.notification_service.NotificationService.send_exception_end_date_updated_notification', return_value=True)
+    def test_end_date_updates_allow_backward_and_forward_moves_for_allowed_roles(self, mock_notify):
+        client = APIClient()
+
+        exc = self.create_exception(profile='low', suffix='end-date-roll')
+        exc.submit(self.requestor)
+        exc.bu_approve(self.approver, notes='BU approved low-risk exception')
+        exc.refresh_from_db()
+
+        approval_anchor = exc.approved_at
+        self.assertIsNotNone(approval_anchor)
+
+        earlier_end_date = approval_anchor + timezone.timedelta(days=5)
+        later_end_date = approval_anchor + timezone.timedelta(days=25)
+
+        for actor, target_date in [
+            (self.approver, earlier_end_date),
+            (self.risk_owner, later_end_date),
+            (self.security_user, approval_anchor + timezone.timedelta(days=15)),
+        ]:
+            client.force_authenticate(user=actor)
+            response = client.post(
+                f'/api/exceptions/{exc.id}/update_end_date/',
+                {
+                    'exception_end_date': target_date.isoformat(),
+                    'notes': f'Adjusted by {actor.username}',
+                },
+                format='json',
+            )
+            self.assertEqual(response.status_code, 200)
+            exc.refresh_from_db()
+            self.assertEqual(exc.exception_end_date.isoformat(), target_date.isoformat())
+
+        self.assertEqual(mock_notify.call_count, 3)
+
+        client.force_authenticate(user=self.requestor)
+        response = client.get(f'/api/exceptions/{exc.id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('end_date_change_history', response.data)
+        self.assertGreaterEqual(len(response.data['end_date_change_history']), 3)
 

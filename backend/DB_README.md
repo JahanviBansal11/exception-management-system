@@ -32,6 +32,22 @@ python manage.py validate_db_schema
 postgresql://postgres:password@localhost:5432/grc_exceptions
 ```
 
+### Async Notifications / Scheduler Notes
+
+The project supports two execution modes for emails and reminders:
+
+- **Industry mode:** Redis + Celery worker + Celery beat
+    - Set `CELERY_TASK_ALWAYS_EAGER=False`
+    - Keep `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` pointed at Redis
+    - Run the worker and beat processes continuously
+
+- **Local mode:** no Redis required
+    - Set `CELERY_TASK_ALWAYS_EAGER=True`
+    - Action-triggered emails run inline
+    - Reminder schedules will not execute automatically unless a scheduler/job runner calls the task entrypoints
+
+Recommended production pattern: use Redis for broker/result backend, SMTP for email transport, and keep SendGrid optional rather than mandatory.
+
 ---
 
 ## Entity Relationship Diagram (ERD)

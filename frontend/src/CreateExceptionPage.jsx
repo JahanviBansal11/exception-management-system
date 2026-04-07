@@ -44,6 +44,28 @@ function RequiredMark() {
   return <span className="ml-1 text-red-600">*</span>
 }
 
+function parseYyyyMmDdToDate(value) {
+  if (!value || typeof value !== 'string') return null
+  const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) return null
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const parsed = new Date(year, month - 1, day, 0, 0, 0, 0)
+
+  if (
+    Number.isNaN(parsed.getTime()) ||
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null
+  }
+
+  return parsed
+}
+
 function parseDdMmYyyyToDate(value) {
   if (!value || typeof value !== 'string') return null
   const match = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
@@ -66,8 +88,12 @@ function parseDdMmYyyyToDate(value) {
   return parsed
 }
 
+function parseExceptionEndDate(value) {
+  return parseYyyyMmDdToDate(value) || parseDdMmYyyyToDate(value)
+}
+
 function isFutureCalendarDate(value) {
-  const parsed = parseDdMmYyyyToDate(value)
+  const parsed = parseExceptionEndDate(value)
   if (!parsed) return false
 
   const now = new Date()
@@ -75,10 +101,21 @@ function isFutureCalendarDate(value) {
   return parsed.getTime() > today.getTime()
 }
 
-function toDdMmYyyy(value) {
+function toYyyyMmDd(value) {
+  const parsed = parseExceptionEndDate(value)
+  if (parsed) {
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`
+  }
+
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
-  return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function getTomorrowDateString() {
+  const today = new Date()
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1, 0, 0, 0, 0)
+  return `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`
 }
 
 const FIELD_LABELS = {
@@ -102,7 +139,7 @@ const FIELD_FIX_HELP = {
   business_unit: 'Select a business unit from the dropdown.',
   exception_type: 'Select an exception type.',
   risk_issue: 'Select the related risk/issue.',
-  exception_end_date: 'Use DD/MM/YYYY and choose a future date.',
+  exception_end_date: 'Choose a future date using the calendar.',
   short_description: 'Enter at least 10 characters.',
   reason_for_exception: 'Enter at least 20 characters explaining the reason.',
   asset_type: 'Select an asset type.',
@@ -132,7 +169,7 @@ const schema = z.object({
   exception_end_date:   z
     .string()
     .min(1, 'Required')
-    .refine((value) => parseDdMmYyyyToDate(value) !== null, 'Use format DD/MM/YYYY')
+    .refine((value) => parseExceptionEndDate(value) !== null, 'Use the date picker to select a valid date')
     .refine((value) => isFutureCalendarDate(value), 'Date must be in the future'),
   assigned_approver:    z.string().min(1, 'Required'),
   risk_owner:           z.string().min(1, 'Required'),
@@ -159,9 +196,9 @@ function normalizeSavedDraft(draft) {
   if (!draft || typeof draft !== 'object') return draft
   const value = draft.exception_end_date
   if (!value || typeof value !== 'string') return draft
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(value.trim())) return draft
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return draft
 
-  const normalized = toDdMmYyyy(value)
+  const normalized = toYyyyMmDd(value)
   if (!normalized) return draft
 
   return {
@@ -266,9 +303,9 @@ export default function CreateExceptionPage() {
   async function onSubmit(values) {
     setSubmitError(null)
     try {
-      const parsedEndDate = parseDdMmYyyyToDate(values.exception_end_date)
+      const parsedEndDate = parseExceptionEndDate(values.exception_end_date)
       if (!parsedEndDate) {
-        form.setError('exception_end_date', { message: 'Use format DD/MM/YYYY' })
+        form.setError('exception_end_date', { message: 'Use the date picker to select a valid date' })
         setSubmitError('Please fix the errors above.')
         return
       }
@@ -337,6 +374,7 @@ export default function CreateExceptionPage() {
   }
 
   const isSubmitting = form.formState.isSubmitting
+  const minSelectableEndDate = getTomorrowDateString()
   const errorEntries = Object.entries(form.formState.errors).map(([fieldName, fieldError]) => ({
     fieldName,
     label: FIELD_LABELS[fieldName] ?? fieldName,
@@ -405,14 +443,13 @@ export default function CreateExceptionPage() {
                     <FormLabel className={fieldState.error ? 'text-red-600' : ''}>Exception End Date<RequiredMark /></FormLabel>
                     <FormControl>
                       <Input
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="DD/MM/YYYY"
+                        type="date"
+                        min={minSelectableEndDate}
                         className={fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''}
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription>Format: DD/MM/YYYY (future date only)</FormDescription>
+                    <FormDescription>Select a future date</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

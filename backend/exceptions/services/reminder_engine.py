@@ -190,7 +190,7 @@ class ReminderEngine:
         already_sent = ReminderLog.objects.filter(
             exception_request=exception,
             reminder_type='Expired_Notice',
-            delivery_status='sent',
+            delivery_status__in=['queued', 'sent'],
             message_content__contains=marker,
         ).exists()
 
