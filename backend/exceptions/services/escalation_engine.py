@@ -8,7 +8,7 @@ import logging
 from django.utils import timezone
 from django.contrib.auth.models import User
 
-from exceptions.models import ExceptionRequest, AuditLog
+from exceptions.models import ExceptionRequest
 from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -16,15 +16,16 @@ logger = logging.getLogger(__name__)
 
 class EscalationEngine:
     """
-    Monitors approval windows and escalates overdue approvals.
-    Keeps workflow status unchanged so approvers can still act.
+    Monitors approval windows and automatically escalates expired exceptions.
+    Marks as "Expired" when approval_deadline passes.
     """
     
     @staticmethod
     def escalate_expired_approvals():
         """
         Find all submitted exceptions past approval deadline.
-        Record escalation and notify approver immediately.
+        Auto-escalate to Expired status.
+        Notify approver immediately.
         """
         logger.info("Starting escalation of expired approvals...")
         
@@ -35,7 +36,8 @@ class EscalationEngine:
         expired = ExceptionRequest.objects.filter(
             status__in=['Submitted', 'AwaitingRiskOwner'],
             approval_deadline__lt=now,
-        ).exclude(reminder_stage='Expired_Notice')
+            reminder_stage__in=['Reminder_90', 'Expired_Notice']  # Only if reminders were sent
+        )
         
         # Get system user for escalation action
         try:
@@ -45,34 +47,16 @@ class EscalationEngine:
         
         for exception in expired:
             try:
-                previous_status = exception.status
-
-                # Record overdue escalation while keeping request actionable.
-                AuditLog.objects.create(
-                    exception_request=exception,
-                    action_type='ESCALATE',
-                    previous_status=previous_status,
-                    new_status=previous_status,
-                    performed_by=system_user,
-                    details={
-                        'message': 'Approval window closed; escalation notice sent while request remains actionable.',
-                        'approval_window_closed': True,
-                        'approval_deadline': exception.approval_deadline.isoformat() if exception.approval_deadline else None,
-                    },
-                )
-
-                # Mark escalation notice as sent so this stays idempotent.
-                exception.reminder_stage = 'Expired_Notice'
-                exception.last_reminder_sent = now
-                exception.save(update_fields=['reminder_stage', 'last_reminder_sent', 'updated_at'])
-
+                # Mark as expired
+                exception.mark_expired(system_user)
+                
                 # Send immediate notification to approver
                 NotificationService.send_approval_expired_notification(exception)
                 
                 escalated_count += 1
                 
                 logger.warning(
-                    f"Escalated exception #{exception.id} with overdue approval notice. "
+                    f"Escalated exception #{exception.id} to EXPIRED status. "
                     f"Approval deadline was {exception.approval_deadline}"
                 )
             

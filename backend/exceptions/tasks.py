@@ -90,7 +90,7 @@ def close_expired_exceptions(self):
 # ============================================
 
 @shared_task(bind=True, max_retries=5)
-def send_email_task(self, subject, message, from_email, recipient_list, reminder_log_id=None):
+def send_email_task(self, subject, message, from_email, recipient_list):
     """
     Send email via SendGrid.
     Retries up to 5 times with exponential backoff.
@@ -102,11 +102,6 @@ def send_email_task(self, subject, message, from_email, recipient_list, reminder
         recipient_list: List of recipient emails
     """
     try:
-        reminder_log = None
-        if reminder_log_id:
-            from exceptions.models import ReminderLog
-            reminder_log = ReminderLog.objects.filter(id=reminder_log_id).first()
-
         email = EmailMessage(
             subject=subject,
             body=message,
@@ -118,23 +113,12 @@ def send_email_task(self, subject, message, from_email, recipient_list, reminder
         result = email.send(fail_silently=False)
         
         if result:
-            if reminder_log:
-                reminder_log.delivery_status = 'sent'
-                reminder_log.error_message = ''
-                reminder_log.save(update_fields=['delivery_status', 'error_message'])
             logger.info(f"Email sent successfully to {recipient_list}")
             return {'status': 'success', 'recipients': recipient_list}
         else:
             raise Exception("Email send returned 0")
     
     except Exception as exc:
-        if reminder_log_id:
-            from exceptions.models import ReminderLog
-            reminder_log = ReminderLog.objects.filter(id=reminder_log_id).first()
-            if reminder_log:
-                reminder_log.delivery_status = 'failed'
-                reminder_log.error_message = str(exc)
-                reminder_log.save(update_fields=['delivery_status', 'error_message'])
         logger.error(f"Error sending email: {str(exc)}")
         # Retry with exponential backoff: 60s, 120s, 240s, 480s, 960s
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))

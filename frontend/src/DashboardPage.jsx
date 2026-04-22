@@ -16,21 +16,16 @@ const ACTION_CONFIG = {
   bu_reject: { endpoint: 'bu_reject', label: 'BU Reject', allowedStatuses: ['Submitted'] },
   risk_assess: { endpoint: 'risk_assess', label: 'Risk Approve', allowedStatuses: ['AwaitingRiskOwner'] },
   risk_reject: { endpoint: 'risk_reject', label: 'Risk Reject', allowedStatuses: ['AwaitingRiskOwner'] },
-  renew: { endpoint: 'renew', label: 'Renew', allowedStatuses: ['Approved'] },
   close: { endpoint: 'close', label: 'Close', allowedStatuses: ['Approved'] },
 }
 
-const ACTIONS_USING_NOTES = new Set(['bu_approve', 'bu_reject', 'risk_assess', 'risk_reject', 'renew'])
+const ACTIONS_USING_NOTES = new Set(['bu_approve', 'bu_reject', 'risk_assess', 'risk_reject'])
 
 function actionUsesNotes(actionKey) {
   return ACTIONS_USING_NOTES.has(actionKey)
 }
 
 function actionRequiresNotes(actionKey, exceptionItem) {
-  if (actionKey === 'renew') {
-    return true
-  }
-
   if (actionKey === 'bu_reject' || actionKey === 'risk_reject') {
     return true
   }
@@ -168,13 +163,6 @@ function isApprovalOverdue(item) {
   return deadline.getTime() < Date.now()
 }
 
-function isApprovalWindowClosed(item) {
-  if (!item) return false
-  if (!['Submitted', 'AwaitingRiskOwner'].includes(item.status)) return false
-  if (item.reminder_stage === 'Expired_Notice') return true
-  return isApprovalOverdue(item)
-}
-
 function sortExceptions(items, sortKey) {
   const sorted = [...items]
   if (sortKey === 'oldest') {
@@ -219,95 +207,10 @@ function reachedRiskOwnerStage(item) {
   return ['pending', 'completed', 'escalated'].includes(riskNotifiedCheckpoint?.status)
 }
 
-function isRiskOwnerRelevant(item) {
-  if (!item) return false
-  if (['High', 'Critical'].includes(item.risk_rating)) return true
-  if (item.status === 'AwaitingRiskOwner') return true
-  return reachedRiskOwnerStage(item)
-}
-
-const CHECKPOINT_STEPPER_ORDER = [
-  { key: 'exception_requested', fallbackLabel: 'Exception Requested' },
-  { key: 'bu_approval_notified', fallbackLabel: 'BU CIO Notified' },
-  { key: 'bu_approval_decision', fallbackLabel: 'BU CIO Decision Received' },
-  { key: 'risk_assessment_notified', fallbackLabel: 'Risk Owner Notified' },
-  { key: 'risk_assessment_complete', fallbackLabel: 'Risk Assessment Complete' },
-  { key: 'final_decision', fallbackLabel: 'Final Decision Made' },
-]
-
-function getCheckpointStepperStages(item) {
-  if (!item) return []
-
-  const checkpointMap = new Map((item.checkpoints || []).map((checkpoint) => [checkpoint.checkpoint, checkpoint]))
-  const hideRiskOwnerCheckpoints = item.risk_rating === 'Low'
-
-  const configuredSteps = CHECKPOINT_STEPPER_ORDER.filter((entry) => {
-    if (!hideRiskOwnerCheckpoints) return true
-    return !['risk_assessment_notified', 'risk_assessment_complete'].includes(entry.key)
-  })
-
-  const mapped = configuredSteps.map((entry) => {
-    const checkpoint = checkpointMap.get(entry.key)
-    const rawStatus = checkpoint?.status || 'pending'
-    const state = ['completed', 'pending', 'skipped', 'escalated'].includes(rawStatus) ? rawStatus : 'pending'
-    return {
-      key: entry.key,
-      label: checkpoint?.checkpoint_display || entry.fallbackLabel,
-      state,
-    }
-  })
-
-  const firstPendingIndex = mapped.findIndex((stage) => stage.state === 'pending')
-  if (firstPendingIndex >= 0) {
-    mapped[firstPendingIndex] = {
-      ...mapped[firstPendingIndex],
-      state: 'active',
-    }
-  }
-
-  return mapped
-}
-
-function getCheckpointByKey(item, checkpointKey) {
-  return (item?.checkpoints || []).find((checkpoint) => checkpoint.checkpoint === checkpointKey) || null
-}
-
-function getNotificationItemKey(item) {
-  return item?.event_key || [
-    item?.event_type || 'na',
-    item?.exception_id || 'na',
-    item?.timestamp || 'na',
-    item?.title || 'na',
-    item?.message || 'na',
-  ].join('|')
-}
-
-function getReferenceLabel(options, selectedId, preferredLabelFields) {
-  if (!Array.isArray(options) || selectedId === null || selectedId === undefined || selectedId === '') return '—'
-  const selected = options.find((entry) => String(entry.id) === String(selectedId))
-  if (!selected) return String(selectedId)
-
-  for (const field of preferredLabelFields) {
-    const value = selected[field]
-    if (value) return String(value)
-  }
-  return String(selected.id)
-}
-
-function toCsvValue(value) {
-  if (value === null || value === undefined) return '""'
-  const text = String(value).replace(/"/g, '""')
-  return `"${text}"`
-}
-
 function canAct(user, exception, actionKey) {
   const config = ACTION_CONFIG[actionKey]
   if (!config || !config.allowedStatuses.includes(exception.status)) {
     return false
-  }
-
-  if (actionKey === 'renew') {
-    return String(user?.id) === String(exception.requested_by) && Boolean(exception.exception_end_date)
   }
 
   const groups = user?.groups || []
@@ -370,8 +273,6 @@ function DashboardPage({ view }) {
   const [actionError, setActionError] = useState('')
   const [summary, setSummary] = useState(null)
   const [notifications, setNotifications] = useState([])
-  const [notificationActionError, setNotificationActionError] = useState('')
-  const [referenceData, setReferenceData] = useState(null)
   const [requesterPopup, setRequesterPopup] = useState(null)
   const [sortKey, setSortKey] = useState('newest')
   const [selectedStatusFilters, setSelectedStatusFilters] = useState([])
@@ -387,7 +288,6 @@ function DashboardPage({ view }) {
   const [endDateUpdateError, setEndDateUpdateError] = useState('')
   const [updatingEndDate, setUpdatingEndDate] = useState(false)
   const [showEndDateEditor, setShowEndDateEditor] = useState(false)
-  const [endDateActionMode, setEndDateActionMode] = useState('update')
   const [showEndDateHistory, setShowEndDateHistory] = useState(false)
   const [adminUsers, setAdminUsers] = useState([])
   const [adminRoles, setAdminRoles] = useState([])
@@ -486,7 +386,6 @@ function DashboardPage({ view }) {
 
   const loadNotifications = useCallback(async () => {
     setLoadingNotifications(true)
-    setNotificationActionError('')
     try {
       const response = await api.get('/api/worklist/notifications/')
       const items = response.data.items || []
@@ -503,21 +402,10 @@ function DashboardPage({ view }) {
           }
         }
       }
-    } catch {
-      setNotificationActionError('Failed to load notifications. Please refresh and try again.')
     } finally {
       setLoadingNotifications(false)
     }
   }, [view, user?.id])
-
-  const loadReferenceData = useCallback(async () => {
-    try {
-      const response = await api.get('/api/reference/')
-      setReferenceData(response.data || null)
-    } catch {
-      setReferenceData(null)
-    }
-  }, [])
 
   const loadAdminUsers = useCallback(async () => {
     if (view !== 'security') return
@@ -549,10 +437,6 @@ function DashboardPage({ view }) {
   useEffect(() => {
     loadAdminUsers()
   }, [loadAdminUsers])
-
-  useEffect(() => {
-    loadReferenceData()
-  }, [loadReferenceData])
 
   useEffect(() => {
     setSelectedId(null)
@@ -591,13 +475,11 @@ function DashboardPage({ view }) {
     if (!selected) {
       setEndDateUpdateError('')
       setShowEndDateEditor(false)
-      setEndDateActionMode('update')
       return
     }
     setEndDateUpdateError('')
     setShowEndDateEditor(false)
     setShowEndDateHistory(false)
-    setEndDateActionMode('update')
   }, [selected])
 
   const availableActions = useMemo(() => {
@@ -677,8 +559,6 @@ function DashboardPage({ view }) {
       if (requiresNotes && !notes) {
         if (actionKey === 'bu_approve') {
           setActionError('Notes are mandatory for High/Critical BU approval.')
-        } else if (actionKey === 'renew') {
-          setActionError('Notes are mandatory for renewal requests.')
         } else {
           setActionError('Feedback is mandatory for rejection.')
         }
@@ -730,8 +610,7 @@ function DashboardPage({ view }) {
     setUpdatingEndDate(true)
     try {
       const isoEndDate = new Date(selectedEndDateInput).toISOString()
-      const endpoint = endDateActionMode === 'renew' ? 'renew' : 'update_end_date'
-      await api.post(`/api/exceptions/${selected.id}/${endpoint}/`, {
+      await api.post(`/api/exceptions/${selected.id}/update_end_date/`, {
         exception_end_date: isoEndDate,
         notes: selectedEndDateNotes.trim(),
       })
@@ -751,7 +630,6 @@ function DashboardPage({ view }) {
         return next
       })
       setShowEndDateEditor(false)
-      setEndDateActionMode('update')
     } catch (error) {
       const detail = error?.response?.data
       if (typeof detail?.detail === 'string') {
@@ -765,11 +643,6 @@ function DashboardPage({ view }) {
     } finally {
       setUpdatingEndDate(false)
     }
-  }
-
-  function openEndDateEditor(mode = 'update') {
-    setEndDateActionMode(mode)
-    setShowEndDateEditor(true)
   }
 
   async function createManagedUser(event) {
@@ -882,143 +755,6 @@ function DashboardPage({ view }) {
   const canCreateException = view === 'requestor' || view === 'security'
   const notificationBadgeCount = notifications.length
   const canUpdateEndDate = ['approver', 'risk-owner', 'security'].includes(view)
-  const canShowEndDateEditor = canUpdateEndDate || endDateActionMode === 'renew'
-  const selectedCheckpointStepperStages = useMemo(() => getCheckpointStepperStages(selected), [selected])
-  const canViewRiskContextTooltip = ['approver', 'risk-owner', 'security'].includes(view)
-
-  const selectedRiskContext = useMemo(() => {
-    if (!selected || !referenceData) return null
-    return {
-      assetType: getReferenceLabel(referenceData.asset_types, selected.asset_type, ['name']),
-      assetPurpose: getReferenceLabel(referenceData.asset_purposes, selected.asset_purpose, ['name']),
-      dataClassification: getReferenceLabel(referenceData.data_classifications, selected.data_classification, ['level', 'name']),
-      internetExposure: getReferenceLabel(referenceData.internet_exposures, selected.internet_exposure, ['label', 'name']),
-      dataComponents: Array.isArray(selected.data_components) && selected.data_components.length > 0
-        ? selected.data_components
-          .map((componentId) => getReferenceLabel(referenceData.data_components, componentId, ['name']))
-          .join(', ')
-        : '—',
-    }
-  }, [selected, referenceData])
-
-  const selectedNoteSections = useMemo(() => {
-    if (!selected) return []
-
-    const sections = []
-    const canSeeRequesterNotes = ['approver', 'risk-owner', 'security'].includes(view)
-
-    if (canSeeRequesterNotes && selected.short_description) {
-      sections.push({
-        label: 'Short Description',
-        value: selected.short_description,
-        recipient: 'Approver and Risk Owner',
-      })
-    }
-
-    if (canSeeRequesterNotes && selected.reason_for_exception) {
-      sections.push({
-        label: 'Reason for Exception',
-        value: selected.reason_for_exception,
-        recipient: 'Approver and Risk Owner',
-      })
-    }
-
-    const buDecisionCheckpoint = getCheckpointByKey(selected, 'bu_approval_decision')
-    if (buDecisionCheckpoint?.notes && ['risk-owner', 'security'].includes(view)) {
-      sections.push({
-        label: 'BU CIO Notes',
-        value: buDecisionCheckpoint.notes,
-        recipient: 'Risk Owner',
-      })
-    }
-
-    const riskDecisionCheckpoint = getCheckpointByKey(selected, 'risk_assessment_complete')
-    if (riskDecisionCheckpoint?.notes && isRiskOwnerRelevant(selected) && ['requestor', 'security'].includes(view)) {
-      sections.push({
-        label: 'Risk Owner Notes',
-        value: riskDecisionCheckpoint.notes,
-        recipient: 'Requestor',
-      })
-    }
-
-    const finalDecisionCheckpoint = getCheckpointByKey(selected, 'final_decision')
-    if (finalDecisionCheckpoint?.notes && ['requestor', 'security'].includes(view)) {
-      sections.push({
-        label: 'Decision Notes',
-        value: finalDecisionCheckpoint.notes,
-        recipient: 'Requestor',
-      })
-    }
-
-    return sections
-  }, [selected, view])
-
-  async function dismissNotification(item) {
-    const eventKey = getNotificationItemKey(item)
-    setNotificationActionError('')
-    try {
-      await api.post('/api/worklist/notifications/dismiss/', { event_key: eventKey })
-      setNotifications((current) => current.filter((entry) => getNotificationItemKey(entry) !== eventKey))
-    } catch {
-      setNotificationActionError('Failed to dismiss notification. Please retry.')
-    }
-  }
-
-  function downloadSecurityReport() {
-    if (view !== 'security') return
-
-    const headers = [
-      'Exception ID',
-      'Status',
-      'Risk Rating',
-      'Risk Score',
-      'Business Unit',
-      'Short Description',
-      'Requested By User ID',
-      'Requested By Username',
-      'Assigned Approver User ID',
-      'Assigned Approver Username',
-      'Risk Owner User ID',
-      'Risk Owner Username',
-      'Created At',
-      'Submitted At',
-      'Updated At',
-      'Approval Deadline',
-      'Exception End Date',
-    ]
-
-    const rows = listItems.map((item) => [
-      item.id,
-      item.status,
-      item.risk_rating || '',
-      item.risk_score ?? '',
-      item.business_unit,
-      item.short_description,
-      item.requested_by,
-      item.requested_by_username || '',
-      item.assigned_approver,
-      item.assigned_approver_username || '',
-      item.risk_owner,
-      item.risk_owner_username || '',
-      item.created_at || '',
-      item.submitted_at || '',
-      item.updated_at || '',
-      item.approval_deadline || '',
-      item.exception_end_date || '',
-    ])
-
-    const csvLines = [headers, ...rows].map((line) => line.map((value) => toCsvValue(value)).join(','))
-    const csvText = csvLines.join('\n')
-    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' })
-    const href = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = href
-    link.download = `security-dashboard-report-${new Date().toISOString().slice(0, 10)}.csv`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(href)
-  }
 
   return (
     <div className="shell">
@@ -1038,11 +774,6 @@ function DashboardPage({ view }) {
           {view === 'security' ? (
             <button className="btn" style={{ width: 'auto' }} onClick={() => navigate('/audit-log')}>
               Audit Log
-            </button>
-          ) : null}
-          {view === 'security' ? (
-            <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={downloadSecurityReport}>
-              Download Report
             </button>
           ) : null}
           <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={logout}>
@@ -1418,10 +1149,7 @@ function DashboardPage({ view }) {
               >
                 <div className="list-card-top">
                   <strong>#{item.id}</strong>
-                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    <span className={`badge badge-${statusTone(item.status)}`}>{item.status}</span>
-                    {isApprovalWindowClosed(item) ? <span className="badge badge-warning">Approval Window Closed</span> : null}
-                  </div>
+                  <span className={`badge badge-${statusTone(item.status)}`}>{item.status}</span>
                 </div>
                 <div>{item.short_description}</div>
                 <div className="meta">Risk: {item.risk_rating || 'Pending calculation'}</div>
@@ -1454,47 +1182,13 @@ function DashboardPage({ view }) {
                   <div style={{ paddingTop: '12px' }}>
                     <div className="detail-grid">
                       <div><strong>ID:</strong> #{selected.id}</div>
-                      <div>
-                        <strong>Status:</strong>{' '}
-                        <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span>
-                        {isApprovalWindowClosed(selected) ? <span className="badge badge-warning" style={{ marginLeft: '8px' }}>Approval Window Closed</span> : null}
-                      </div>
-                      <div>
-                        <strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})
-                        {canViewRiskContextTooltip ? (
-                          <span className="tooltip-wrap" style={{ marginLeft: '6px' }}>
-                            <button type="button" className="tooltip-trigger" aria-label="Risk score context">ⓘ</button>
-                            <span className="tooltip-content tooltip-content-wide">
-                              <strong>Selected Risk Inputs</strong>
-                              <br />Asset Type: {selectedRiskContext?.assetType || '—'}
-                              <br />Asset Purpose: {selectedRiskContext?.assetPurpose || '—'}
-                              <br />Data Classification: {selectedRiskContext?.dataClassification || '—'}
-                              <br />Internet Exposure: {selectedRiskContext?.internetExposure || '—'}
-                              <br />Data Components: {selectedRiskContext?.dataComponents || '—'}
-                            </span>
-                          </span>
-                        ) : null}
-                      </div>
+                      <div><strong>Status:</strong> <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span></div>
+                      <div><strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})</div>
                       <div><strong>Business Unit:</strong> {selected.business_unit}</div>
                       <div><strong>Created By:</strong> {selected.requested_by} ({selected.requested_by_username || '—'})</div>
                       <div><strong>Assigned Approver:</strong> {selected.assigned_approver} ({selected.assigned_approver_username || '—'})</div>
                       <div><strong>Risk Owner:</strong> {selected.risk_owner} ({selected.risk_owner_username || '—'})</div>
                     </div>
-
-                    {selectedNoteSections.length > 0 ? (
-                      <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
-                        <strong>Notes visible for this exception</strong>
-                        {selectedNoteSections.map((section) => (
-                          <div key={section.label} className="checkpoint-item" style={{ padding: '12px' }}>
-                            <div className="list-card-top">
-                              <span><strong>{section.label}</strong></span>
-                              <span className="badge badge-info">{section.recipient}</span>
-                            </div>
-                            <div style={{ whiteSpace: 'pre-wrap' }}>{section.value}</div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
                   </div>
                 )}
               </div>
@@ -1520,7 +1214,7 @@ function DashboardPage({ view }) {
                         }}
                       />
                       <div className="meta" style={{ marginTop: '4px' }}>
-                        Notes are required for rejection and renewal. For approvals, notes are optional except High/Critical BU approvals.
+                        Notes are required for rejection. For approvals, notes are optional except High/Critical BU approvals.
                       </div>
                     </>
                   ) : null}
@@ -1532,13 +1226,7 @@ function DashboardPage({ view }) {
                         key={actionKey}
                         className="btn"
                         style={{ width: 'auto' }}
-                        onClick={() => {
-                          if (actionKey === 'renew') {
-                            openEndDateEditor('renew')
-                            return
-                          }
-                          runAction(actionKey)
-                        }}
+                        onClick={() => runAction(actionKey)}
                       >
                         {config.label}
                         {actionRequiresNotes(actionKey, selected) ? <span className="error" style={{ display: 'inline', marginLeft: '4px', marginBottom: 0 }}>*</span> : null}
@@ -1578,7 +1266,7 @@ function DashboardPage({ view }) {
                           <button
                             className="btn btn-secondary"
                             style={{ width: 'auto', marginLeft: '12px', fontWeight: 'normal' }}
-                            onClick={() => openEndDateEditor('update')}
+                            onClick={() => setShowEndDateEditor((current) => !current)}
                           >
                             {showEndDateEditor ? 'Cancel' : 'Update End Date'}
                           </button>
@@ -1586,7 +1274,7 @@ function DashboardPage({ view }) {
                       </div>
                     </div>
 
-                    {canShowEndDateEditor && showEndDateEditor ? (
+                    {canUpdateEndDate && showEndDateEditor ? (
                       <div style={{ marginTop: '10px', padding: '12px', border: '1px solid #e5e7eb', borderRadius: '0.375rem', backgroundColor: '#f9fafb' }}>
                         <div className="detail-grid">
                           <div>
@@ -1621,7 +1309,7 @@ function DashboardPage({ view }) {
                         </div>
                         <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
                           <button className="btn" style={{ width: 'auto' }} onClick={updateExceptionEndDate} disabled={updatingEndDate}>
-                            {updatingEndDate ? 'Updating...' : (endDateActionMode === 'renew' ? 'Save Renewal' : 'Save End Date')}
+                            {updatingEndDate ? 'Updating...' : 'Save End Date'}
                           </button>
                           <button
                             className="btn btn-secondary"
@@ -1683,17 +1371,18 @@ function DashboardPage({ view }) {
                 </div>
                 {expandedTabs.checkpoints && (
                   <div style={{ paddingTop: '12px' }}>
-                    <div className="checkpoint-stepper">
-                      {selectedCheckpointStepperStages.map((stage, index) => (
-                        <div key={stage.key} className="checkpoint-stepper-item">
-                          <div className={`checkpoint-stepper-dot checkpoint-stepper-dot-${stage.state}`}>
-                            {stage.state === 'completed' ? '✓' : stage.state === 'skipped' ? '↷' : stage.state === 'escalated' ? '!' : index + 1}
+                    <div className="checkpoint-list">
+                      {(selected.checkpoints || []).map((checkpoint) => (
+                        <div key={checkpoint.checkpoint} className="checkpoint-item">
+                          <div className="list-card-top">
+                            <span>{checkpoint.checkpoint_display}</span>
+                            <span className={`badge badge-${checkpoint.status === 'completed' ? 'success' : checkpoint.status === 'skipped' ? 'muted' : checkpoint.status === 'escalated' ? 'danger' : 'warning'}`}>
+                              {checkpoint.status}
+                            </span>
                           </div>
-                          <div className="checkpoint-stepper-texts">
-                            <div className="checkpoint-stepper-label">{stage.label}</div>
-                            <div className={`checkpoint-stepper-state checkpoint-stepper-state-${stage.state}`}>{stage.state}</div>
-                          </div>
-                          {index < selectedCheckpointStepperStages.length - 1 ? <div className="checkpoint-stepper-line" /> : null}
+                          <div className="meta">{checkpoint.completed_by_name || 'System / Pending'}</div>
+                          <div className="meta">Timestamp: {formatDateTimeWithSeconds(checkpoint.completed_at)}</div>
+                          {checkpoint.notes ? <div className="meta">{checkpoint.notes}</div> : null}
                         </div>
                       ))}
                     </div>
@@ -1762,13 +1451,19 @@ function DashboardPage({ view }) {
 
             {loadingNotifications ? <div className="meta">Loading notifications...</div> : null}
             {!loadingNotifications && notifications.length === 0 ? <div className="meta">No notifications right now.</div> : null}
-            {notificationActionError ? <div className="error" style={{ marginTop: '8px' }}>{notificationActionError}</div> : null}
 
             <div className="notification-list notification-list-scroll">
               {notifications.map((item, index) => (
-                <div
+                <button
                   key={`${item.event_type}-${item.exception_id || 'na'}-${item.timestamp || index}`}
+                  type="button"
                   className="notification-item"
+                  onClick={() => {
+                    if (item.exception_id) {
+                      setSelectedId(item.exception_id)
+                    }
+                    setNotificationsOpen(false)
+                  }}
                 >
                   <div className="list-card-top">
                     <strong>{item.title}</strong>
@@ -1778,30 +1473,7 @@ function DashboardPage({ view }) {
                   </div>
                   <div>{item.message}</div>
                   <div className="meta">{formatDateTime(item.timestamp)}</div>
-                  <div className="notification-item-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ width: 'auto', padding: '6px 10px' }}
-                      onClick={() => {
-                        if (item.exception_id) {
-                          setSelectedId(item.exception_id)
-                        }
-                        setNotificationsOpen(false)
-                      }}
-                    >
-                      View
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary notification-dismiss-btn"
-                      style={{ width: 'auto', padding: '6px 10px' }}
-                      onClick={() => dismissNotification(item)}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>

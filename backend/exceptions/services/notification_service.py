@@ -171,15 +171,6 @@ class NotificationService:
             )
             email.content_subtype = 'html'
             
-            reminder_log = ReminderLog.objects.create(
-                exception_request=exception_request,
-                sent_to=approver,
-                channel='email',
-                reminder_type=reminder_type,
-                delivery_status='queued',
-                message_content=html_message[:500],
-            )
-
             # Send via Celery task
             from exceptions.tasks import send_email_task
             send_email_task.delay(
@@ -187,11 +178,20 @@ class NotificationService:
                 message=html_message,
                 from_email=email.from_email,
                 recipient_list=email.to,
-                reminder_log_id=reminder_log.id,
+            )
+            
+            # Log reminder
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=approver,
+                channel='email',
+                reminder_type=reminder_type,
+                delivery_status='sent',
+                message_content=html_message[:500],  # Preview
             )
             
             logger.info(
-                f"Approval reminder queued to {approver.email} for exception #{exception_request.id}"
+                f"Approval reminder sent to {approver.email} for exception #{exception_request.id}"
             )
             return True
         
@@ -373,26 +373,25 @@ class NotificationService:
             html_message = NotificationService._render_active_expiry_reminder_template(context)
             body_with_marker = f"{marker}\n{html_message}"
 
-            reminder_log = ReminderLog.objects.create(
-                exception_request=exception_request,
-                sent_to=requester,
-                channel='email',
-                reminder_type='Expired_Notice',
-                delivery_status='queued',
-                message_content=body_with_marker[:1000],
-            )
-
             from exceptions.tasks import send_email_task
             send_email_task.delay(
                 subject=f"[REMINDER] Active Exception Progress {reminder_stage}: {exception_request.short_description[:50]}",
                 message=html_message,
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[requester.email],
-                reminder_log_id=reminder_log.id,
+            )
+
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=requester,
+                channel='email',
+                reminder_type='Expired_Notice',
+                delivery_status='sent',
+                message_content=body_with_marker[:1000],
             )
 
             logger.info(
-                f"Active expiry reminder ({reminder_stage}) queued to {requester.email} for exception #{exception_request.id}"
+                f"Active expiry reminder ({reminder_stage}) sent to {requester.email} for exception #{exception_request.id}"
             )
             return True
 
@@ -410,60 +409,6 @@ class NotificationService:
                 delivery_status='failed',
                 error_message=str(e),
                 message_content=f"ACTIVE_EXPIRY:{reminder_stage}",
-            )
-            return False
-
-    @staticmethod
-    def send_exception_end_date_updated_notification(
-        exception_request: ExceptionRequest,
-        previous_end_date,
-        new_end_date,
-        updated_by,
-        notes: str,
-    ) -> bool:
-        """Notify requestor and decision owners when end date changes."""
-        try:
-            recipients = []
-            seen = set()
-            for user in [exception_request.requested_by, exception_request.assigned_approver, exception_request.risk_owner]:
-                if user and user.email and user.email not in seen:
-                    recipients.append(user.email)
-                    seen.add(user.email)
-
-            if not recipients:
-                logger.warning(
-                    f"No recipients available for end date update notification on exception #{exception_request.id}"
-                )
-                return False
-
-            actor_name = updated_by.get_full_name() or updated_by.username
-            context = {
-                'exception': exception_request,
-                'updated_by_name': actor_name,
-                'previous_end_date': previous_end_date,
-                'new_end_date': new_end_date,
-                'notes': notes,
-                'review_link': NotificationService._build_portal_link('requestor', exception_request.id),
-            }
-
-            html_message = NotificationService._render_end_date_updated_template(context)
-
-            from exceptions.tasks import send_email_task
-            send_email_task.delay(
-                subject=f"Exception End Date Updated: {exception_request.short_description[:50]}",
-                message=html_message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=recipients,
-            )
-
-            logger.info(
-                f"End date update notification queued for exception #{exception_request.id} to {recipients}"
-            )
-            return True
-
-        except Exception as e:
-            logger.error(
-                f"Failed to send end date update notification for exception #{exception_request.id}: {str(e)}"
             )
             return False
     
@@ -542,33 +487,10 @@ class NotificationService:
             <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
             <p><strong>Description:</strong> {{ exception.short_description }}</p>
             <p><strong>Requested By:</strong> {{ requester.get_full_name }}</p>
-            <p><strong>Approval Window:</strong> <span style="color: #92400e;">CLOSED</span></p>
+            <p><strong>Status:</strong> <span style="color: red;">EXPIRED</span></p>
         </div>
         
         <p>Please take action immediately to review and approve/reject this exception.</p>
-        """
-        from django.template import Template, Context
-        t = Template(template)
-        return t.render(Context(context))
-
-    @staticmethod
-    def _render_end_date_updated_template(context):
-        """Render end date update notification email template."""
-        template = """
-        <h2>Exception End Date Updated</h2>
-        <p>Hello,</p>
-        <p>The end date for this exception has been updated.</p>
-
-        <div style="border: 1px solid #ddd; padding: 15px; margin: 20px 0;">
-            <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
-            <p><strong>Description:</strong> {{ exception.short_description }}</p>
-            <p><strong>Updated By:</strong> {{ updated_by_name }}</p>
-            <p><strong>Previous End Date:</strong> {{ previous_end_date|date:"M d, Y H:i" }}</p>
-            <p><strong>New End Date:</strong> {{ new_end_date|date:"M d, Y H:i" }}</p>
-            <p><strong>Notes:</strong> {{ notes }}</p>
-        </div>
-
-        <p><a href="{{ review_link }}">Open Exception</a></p>
         """
         from django.template import Template, Context
         t = Template(template)
