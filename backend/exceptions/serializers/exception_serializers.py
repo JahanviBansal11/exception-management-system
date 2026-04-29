@@ -29,6 +29,7 @@ class ExceptionRequestListSerializer(serializers.ModelSerializer):
     risk_owner_username = serializers.SerializerMethodField()
     business_unit_code = serializers.CharField(source='business_unit.bu_code', read_only=True)
     business_unit_name = serializers.CharField(source='business_unit.name', read_only=True)
+    submitted_at = serializers.SerializerMethodField()
 
     class Meta:
         model = ExceptionRequest
@@ -43,7 +44,7 @@ class ExceptionRequestListSerializer(serializers.ModelSerializer):
             "requested_by", "requested_by_username",
             "assigned_approver", "assigned_approver_username",
             "risk_owner", "risk_owner_username",
-            "version"
+            "version", "submitted_at",
         )
         read_only_fields = fields
 
@@ -55,6 +56,16 @@ class ExceptionRequestListSerializer(serializers.ModelSerializer):
 
     def get_risk_owner_username(self, obj):
         return obj.risk_owner.username if obj.risk_owner else None
+
+    def get_submitted_at(self, obj):
+        log = AuditLog.objects.filter(
+            exception_request=obj, action_type="SUBMIT",
+        ).order_by("timestamp").first()
+        if log:
+            return log.timestamp
+        if obj.status not in {"Draft"}:
+            return obj.updated_at
+        return None
 
 
 class ExceptionRequestSerializer(serializers.ModelSerializer):
