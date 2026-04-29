@@ -1,6 +1,7 @@
 from rest_framework.permissions import BasePermission
 
 
+SECURITY_GROUP_NAME = "Security"
 RISK_OWNER_GROUP = "RiskOwner"
 RISK_OWNER_GROUP_NAMES = (RISK_OWNER_GROUP,)
 
@@ -43,14 +44,20 @@ class IsAssignedApprover(BasePermission):
 
 
 class IsSecurity(BasePermission):
-    """Allow Security group members to override actions."""
-    
-    def has_permission(self, request, view):
-        return request.user.groups.filter(name="Security").exists()
+    """Allow Security group members, staff, and superusers to override actions."""
 
-    def has_object_permission(self, request, view, obj):
-        # Security can do anything
-        return request.user.groups.filter(name="Security").exists()
+    def _check(self, user):
+        return (
+            user.is_superuser or
+            user.is_staff or
+            user.groups.filter(name=SECURITY_GROUP_NAME).exists()
+        )
+
+    def has_permission(self, request, _view):
+        return self._check(request.user)
+
+    def has_object_permission(self, request, _view, _obj):
+        return self._check(request.user)
 
 
 class CanApproveOrReject(BasePermission):

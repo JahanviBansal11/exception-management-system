@@ -1,10 +1,10 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import './App.css'
 import { useAuth } from './useAuth.js'
-import LoginPage from './LoginPage.jsx'
-import DashboardPage from './DashboardPage.jsx'
-import CreateExceptionPage from './CreateExceptionPage.jsx'
-import AuditLogPage from './AuditLogPage.jsx'
+import LoginPage from './pages/Login/LoginPage.jsx'
+import DashboardPage from './pages/dashboard/DashboardPage.jsx'
+import CreateExceptionPage from './pages/CreateException/CreateExceptionPage.jsx'
+import AuditLogPage from './pages/AuditLog/AuditLogPage.jsx'
 
 function getDashboardViewForUser(user) {
   const groups = user?.groups || []

@@ -6,6 +6,30 @@
 
 ---
 
+## Baseline Contract for Branch Strategy
+
+### Baseline Objective
+- Baseline cleanup removes existing redundancies and inefficiencies from the current codebase.
+- Baseline cleanup preserves current approved behavior unless a conflict/bug requires alignment.
+- Baseline cleanup does not introduce feature-specific workflow behavior.
+
+### Main Branch Contract
+- `main` keeps the baseline forward-pass workflow stable.
+- Current action-triggered email notifications remain in baseline scope.
+
+
+### Deferred Branch Contract
+- Async notification mechanism redesign is out of baseline scope.
+- A dedicated async-notification branch will handle queue/delivery architecture improvements.
+- Feature branches (extension/modification/remediation/expired-unactioned) implement their own business logic only after baseline merges.
+
+### Scope Guardrails
+- No major notification architecture redesign in baseline PRs.
+- No feature-specific workflow policy in baseline PRs.
+- Shared fixes first merge to `main`, then feature branches rebase.
+
+---
+
 ## Core Tables (Must Exist & Be Correct)
 
 ### Reference/Master Data (immutable)

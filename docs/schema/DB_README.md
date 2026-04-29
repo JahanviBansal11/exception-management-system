@@ -34,6 +34,38 @@ postgresql://postgres:password@localhost:5432/grc_exceptions
 
 ---
 
+## Baseline Main Scope (Forward Pass Only)
+
+This section defines what belongs in `main` during baseline cleanup.
+
+### Baseline Objective
+- Remove redundancies and inefficiencies from the present implementation.
+- Keep baseline behavior stable while cleaning duplicated or unnecessary paths.
+- Do not introduce feature-specific logic during baseline cleanup.
+
+### In Scope for Main
+- Keep the existing forward-pass workflow behavior as the stable baseline.
+- Keep current action-triggered email notifications as-is (submission/approve/reject/reminder flows).
+- Remove redundant notification code paths to ensure one canonical mechanism per event.
+- Keep shared process nodes, checkpoints, and audit pipeline that all feature branches depend on.
+
+### Out of Scope for Main
+- Async notification mechanism redesign/refactor.
+- New queue architecture for notifications beyond current behavior.
+- Extension/renewal, modification, remediation, and expired-without-action policy behavior.
+
+### Notification Boundary Rule (Baseline)
+- Baseline cleanup may delete duplicate notification triggers.
+- Baseline cleanup must not redesign notification delivery architecture.
+- Async notification redesign will be implemented in a dedicated feature branch.
+
+### Definition of Done for Step 1
+- [ ] Baseline scope documented and agreed.
+- [ ] Notification scope explicitly separated: baseline cleanup vs async redesign branch.
+- [ ] Team can decide in < 30 seconds whether a notification change belongs in baseline or async branch.
+
+---
+
 ## Entity Relationship Diagram (ERD)
 
 ```
@@ -383,7 +415,7 @@ pg_dump -U postgres -h localhost grc_exceptions | gzip > backup_$(date +%Y%m%d_%
 psql -U postgres -h localhost grc_exceptions < backup_20260327_120000.sql
 
 # From compressed
-gunzip backup_20260327_120000.sql.gz && psql -U postgres -h localhost grc_exceptions < backup_20260327_120000.sql
+gunzip backup_20260327_20000.sql.gz && psql -U postgres -h localhost grc_exceptions < backup_20260327_120000.sql
 ```
 
 ---
@@ -441,8 +473,8 @@ REINDEX DATABASE grc_exceptions;
 
 ## Contact & Ownership
 
-- **Database Schema Owner:** You (Intern)
-- **Mentor/Technical Lead:** [Name]
+- **Database Schema Owner:** Jahanvi Bansal
+- **Mentor/Technical Lead:** Tushar Singla
 - **Last Schema Review:** March 27, 2026
 
 For questions, contact or escalate via team channel.

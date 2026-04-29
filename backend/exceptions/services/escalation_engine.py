@@ -1,133 +1,88 @@
 """
-Escalation Engine
-Automatically escalates exceptions when approval deadline passes.
-Called periodically by Celery Beat schedule.
+EscalationEngine — scheduled auto-expiry and auto-close of exceptions.
+
+Called by Celery Beat tasks. Delegates state changes to WorkflowService.
 """
 
 import logging
-from django.utils import timezone
-from django.contrib.auth.models import User
 
-from exceptions.models import ExceptionRequest
-from .notification_service import NotificationService
+from django.contrib.auth.models import User
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 
+def _system_user():
+    try:
+        return User.objects.get(username="system")
+    except User.DoesNotExist:
+        return User.objects.filter(is_superuser=True).first()
+
+
 class EscalationEngine:
-    """
-    Monitors approval windows and automatically escalates expired exceptions.
-    Marks as "Expired" when approval_deadline passes.
-    """
-    
+
     @staticmethod
-    def escalate_expired_approvals():
+    def escalate_expired_approvals() -> int:
         """
-        Find all submitted exceptions past approval deadline.
-        Auto-escalate to Expired status.
-        Notify approver immediately.
+        Find all Submitted/AwaitingRiskOwner exceptions past their approval_deadline.
+        Transition each to ApprovalDeadlinePassed via WorkflowService.
         """
-        logger.info("Starting escalation of expired approvals...")
-        
+        from exceptions.models import ExceptionRequest
+        from exceptions.services.workflow_service import WorkflowService
+        from exceptions.services.notification_service import NotificationService
+
         now = timezone.now()
-        escalated_count = 0
-        
-        # Find all exceptions pending approval that are past deadline
-        expired = ExceptionRequest.objects.filter(
-            status__in=['Submitted', 'AwaitingRiskOwner'],
+        expired_qs = ExceptionRequest.objects.filter(
+            status__in=["Submitted", "AwaitingRiskOwner"],
             approval_deadline__lt=now,
-            reminder_stage__in=['Reminder_90', 'Expired_Notice']  # Only if reminders were sent
         )
-        
-        # Get system user for escalation action
-        try:
-            system_user = User.objects.get(username='system') or User.objects.first()
-        except:
-            system_user = User.objects.first()
-        
-        for exception in expired:
+
+        user = _system_user()
+        count = 0
+
+        for exception in expired_qs:
             try:
-                # Mark as expired
-                exception.mark_expired(system_user)
-                
-                # Send immediate notification to approver
+                WorkflowService.mark_expired(exception, user)
                 NotificationService.send_approval_expired_notification(exception)
-                
-                escalated_count += 1
-                
+                count += 1
                 logger.warning(
-                    f"Escalated exception #{exception.id} to EXPIRED status. "
-                    f"Approval deadline was {exception.approval_deadline}"
+                    "Approval deadline passed for exception #%s (deadline was %s)",
+                    exception.id, exception.approval_deadline,
                 )
-            
-            except Exception as e:
-                logger.error(
-                    f"Error escalating exception #{exception.id}: {str(e)}"
-                )
-        
-        logger.info(f"Completed escalation. Escalated {escalated_count} exceptions.")
-        return escalated_count
-    
+            except Exception as exc:
+                logger.error("Error processing deadline for exception #%s: %s", exception.id, exc)
+
+        logger.info("EscalationEngine: marked %s exceptions as ApprovalDeadlinePassed.", count)
+        return count
+
     @staticmethod
-    def close_expired_exceptions():
+    def close_expired_exceptions() -> int:
         """
-        Find all approved exceptions past validity end date.
-        Auto-close them.
+        Find all Approved exceptions past their exception_end_date.
+        Transition each to Closed via WorkflowService.
         """
-        logger.info("Starting closure of expired approved exceptions...")
-        
+        from exceptions.models import ExceptionRequest
+        from exceptions.services.workflow_service import WorkflowService
+
         now = timezone.now()
-        closed_count = 0
-        
-        # Find approved exceptions past validity window
-        expired_approvals = ExceptionRequest.objects.filter(
-            status='Approved',
-            exception_end_date__lt=now
+        closeable_qs = ExceptionRequest.objects.filter(
+            status="Approved",
+            exception_end_date__lt=now,
         )
-        
-        try:
-            system_user = User.objects.get(username='system') or User.objects.first()
-        except:
-            system_user = User.objects.first()
-        
-        for exception in expired_approvals:
+
+        user = _system_user()
+        count = 0
+
+        for exception in closeable_qs:
             try:
-                # Close the exception
-                exception.close(system_user)
-                closed_count += 1
-                
+                WorkflowService.close(exception, user)
+                count += 1
                 logger.info(
-                    f"Auto-closed exception #{exception.id}. "
-                    f"Validity window ended {exception.exception_end_date}"
+                    "Auto-closed exception #%s (end date was %s)",
+                    exception.id, exception.exception_end_date,
                 )
-            
-            except Exception as e:
-                logger.error(
-                    f"Error closing exception #{exception.id}: {str(e)}"
-                )
-        
-        logger.info(f"Completed closure. Closed {closed_count} exceptions.")
-        return closed_count
-    
-    @staticmethod
-    def notify_critical_exceptions():
-        """
-        Find exceptions with Critical risk rating.
-        Ensure they're being tracked and escalated appropriately.
-        """
-        logger.info("Checking for critical exceptions...")
-        
-        critical = ExceptionRequest.objects.filter(
-            status__in=['Submitted', 'AwaitingRiskOwner'],
-            risk_rating='Critical'
-        )
-        
-        for exception in critical:
-            # TODO: Send alert to security team
-            logger.warning(
-                f"CRITICAL risk exception #{exception.id} pending approval: "
-                f"{exception.short_description}"
-            )
-        
-        logger.info(f"Found {critical.count()} critical exceptions.")
-        return critical.count()
+            except Exception as exc:
+                logger.error("Error closing exception #%s: %s", exception.id, exc)
+
+        logger.info("EscalationEngine: closed %s exceptions.", count)
+        return count

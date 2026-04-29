@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { api } from './api'
-import { useAuth } from './useAuth.js'
+import { api } from '../../services/apiClient'
+import { useAuth } from '../../useAuth.js'
+import { matchesView, sortExceptions, matchesKpi } from '../../hooks/useExceptions.js'
 
 const DASHBOARD_TITLES = {
   requestor: 'Requestor Dashboard',
@@ -58,7 +59,10 @@ function statusTone(status) {
     AwaitingRiskOwner: 'warning',
     Approved: 'success',
     Rejected: 'danger',
-    Expired: 'danger',
+    ApprovalDeadlinePassed: 'danger',
+    Expired: 'warning',
+    Modified: 'muted',
+    Extended: 'muted',
     Closed: 'muted',
   }
   return tones[status] || 'muted'
@@ -69,7 +73,9 @@ const AUDIT_ACTION_LABELS = {
   APPROVE: 'Approved',
   REJECT: 'Rejected',
   CLOSE: 'Closed',
-  EXPIRE: 'Expired',
+  EXPIRE: 'Deadline Passed',
+  MODIFY: 'Modified',
+  EXTEND: 'Extended',
   REMIND: 'Reminder Sent',
   ESCALATE: 'Escalated',
   UPDATE: 'Updated',
@@ -163,49 +169,6 @@ function isApprovalOverdue(item) {
   return deadline.getTime() < Date.now()
 }
 
-function sortExceptions(items, sortKey) {
-  const sorted = [...items]
-  if (sortKey === 'oldest') {
-    sorted.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
-  } else if (sortKey === 'deadline_soonest') {
-    sorted.sort((a, b) => {
-      const aDeadline = a.approval_deadline ? new Date(a.approval_deadline).getTime() : Number.POSITIVE_INFINITY
-      const bDeadline = b.approval_deadline ? new Date(b.approval_deadline).getTime() : Number.POSITIVE_INFINITY
-      return aDeadline - bDeadline
-    })
-  } else if (sortKey === 'deadline_latest') {
-    sorted.sort((a, b) => {
-      const aDeadline = a.approval_deadline ? new Date(a.approval_deadline).getTime() : Number.NEGATIVE_INFINITY
-      const bDeadline = b.approval_deadline ? new Date(b.approval_deadline).getTime() : Number.NEGATIVE_INFINITY
-      return bDeadline - aDeadline
-    })
-  } else {
-    sorted.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
-  }
-  return sorted
-}
-
-function matchesKpi(item, kpiKey) {
-  if (!kpiKey) return true
-  if (kpiKey === 'my_queue_total') return true
-  if (kpiKey === 'pending_action') return ['Submitted', 'AwaitingRiskOwner'].includes(item.status)
-  if (kpiKey === 'overdue_approval') {
-    if (!['Submitted', 'AwaitingRiskOwner'].includes(item.status)) return false
-    if (!item.approval_deadline) return false
-    const deadline = new Date(item.approval_deadline)
-    if (Number.isNaN(deadline.getTime())) return false
-    return deadline.getTime() < Date.now()
-  }
-  if (kpiKey === 'approved') return item.status === 'Approved'
-  return true
-}
-
-function reachedRiskOwnerStage(item) {
-  if (!item) return false
-  const checkpoints = item.checkpoints || []
-  const riskNotifiedCheckpoint = checkpoints.find((checkpoint) => checkpoint.checkpoint === 'risk_assessment_notified')
-  return ['pending', 'completed', 'escalated'].includes(riskNotifiedCheckpoint?.status)
-}
 
 function canAct(user, exception, actionKey) {
   const config = ACTION_CONFIG[actionKey]
@@ -232,26 +195,6 @@ function canAct(user, exception, actionKey) {
   return false
 }
 
-function matchesView(item, view, userId) {
-  if (!item || !view || !userId) return false
-
-  const hideDraftsForView = ['approver', 'risk-owner', 'security'].includes(view)
-  if (hideDraftsForView && item.status === 'Draft') return false
-
-  if (view === 'security') return true
-  if (view === 'requestor') return item.requested_by === userId
-  if (view === 'approver') return item.assigned_approver === userId
-  if (view === 'risk-owner') {
-    if (item.risk_owner !== userId) return false
-    if (item.status === 'AwaitingRiskOwner') return true
-    if (['Approved', 'Rejected', 'Expired', 'Closed'].includes(item.status)) {
-      return reachedRiskOwnerStage(item)
-    }
-    return false
-  }
-
-  return false
-}
 
 function DashboardPage({ view }) {
   const { user, logout } = useAuth()
@@ -1184,7 +1127,7 @@ function DashboardPage({ view }) {
                       <div><strong>ID:</strong> #{selected.id}</div>
                       <div><strong>Status:</strong> <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span></div>
                       <div><strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})</div>
-                      <div><strong>Business Unit:</strong> {selected.business_unit}</div>
+                      <div><strong>Business Unit:</strong> {selected.business_unit_code ? `${selected.business_unit_code} (${selected.business_unit_name})` : selected.business_unit}</div>
                       <div><strong>Created By:</strong> {selected.requested_by} ({selected.requested_by_username || '—'})</div>
                       <div><strong>Assigned Approver:</strong> {selected.assigned_approver} ({selected.assigned_approver_username || '—'})</div>
                       <div><strong>Risk Owner:</strong> {selected.risk_owner} ({selected.risk_owner_username || '—'})</div>

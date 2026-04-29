@@ -1,54 +1,43 @@
+"""
+Signals for ExceptionRequest.
+
+Only handles risk recalculation triggered by model saves and M2M changes.
+All other side effects (notifications, checkpoints) are handled explicitly
+by WorkflowService — not via signals.
+"""
+
 from django.db.models.signals import post_save, m2m_changed
 from django.dispatch import receiver
-from .models import ExceptionRequest
+
+from exceptions.models import ExceptionRequest
 
 
-# -----------------------------------
-# Recalculate on ForeignKey updates
-# -----------------------------------
+_RISK_FIELDS = {"asset_type", "asset_purpose", "data_classification", "internet_exposure", "number_of_assets"}
+
 
 @receiver(post_save, sender=ExceptionRequest)
-def recalculate_on_save(sender, instance, created, **kwargs):
+def recalculate_risk_on_save(sender, instance, created, **kwargs):
+    """Recalculate risk when risk-relevant FK fields change."""
+    if created:
+        return  # No risk data yet on creation
+
     update_fields = kwargs.get("update_fields")
 
-    # Avoid recalculating if risk fields are already updated
-    if update_fields and \
-       ("risk_score" in update_fields or
-        "risk_rating" in update_fields):
+    # Skip if we're already writing risk fields (avoids recursion)
+    if update_fields and {"risk_score", "risk_rating"} & set(update_fields):
         return
 
-    if update_fields:
-        risk_related_fields = {
-            "asset_type",
-            "asset_purpose",
-            "data_classification",
-            "internet_exposure",
-            "number_of_assets",
-        }
-
-        if not risk_related_fields.intersection(set(update_fields)):
-            return
-
-    if created:
+    # Only recalculate if a risk-relevant field was actually updated
+    if update_fields and not (_RISK_FIELDS & set(update_fields)):
         return
 
-    instance.recalculate_risk()
+    from exceptions.services.risk_service import RiskService
+    RiskService.recalculate_and_persist(instance)
 
-
-# -----------------------------------
-# Recalculate when ManyToMany changes
-# -----------------------------------
 
 @receiver(m2m_changed, sender=ExceptionRequest.data_components.through)
-def recalculate_on_m2m_change(sender, instance, action, **kwargs):
-
-    if action in ["post_add", "post_remove", "post_clear"]:
-        instance.recalculate_risk()
-
-
-# -----------------------------------
-# Audit Logging Removed
-# -----------------------------------
-# Previously, log_exception_changes created duplicate AuditLog entries.
-# All audit logging now happens explicitly in model methods (_change_status).
-# Rationale: Signals create implicit side effects that are hard to trace.
+def recalculate_risk_on_m2m_change(sender, instance, action, **kwargs):
+    """Recalculate risk when data_components M2M changes."""
+    if action in {"post_add", "post_remove", "post_clear"}:
+        from exceptions.services.risk_service import RiskService
+        RiskService.recalculate_and_persist(instance)
