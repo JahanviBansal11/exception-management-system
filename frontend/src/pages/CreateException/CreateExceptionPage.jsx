@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { referenceService } from '../../services/referenceService'
 import { exceptionService } from '../../services/exceptionService'
 
@@ -24,21 +24,29 @@ import { ArrowLeft, Loader2 } from 'lucide-react'
 
 const DRAFT_STORAGE_KEY = 'create-exception-form-draft'
 
+const EMPTY_DEFAULTS = {
+  business_unit: '', exception_type: '', risk_issue: '',
+  asset_type: '', asset_purpose: '', data_classification: '',
+  data_components: [], internet_exposure: '',
+  number_of_assets: '', short_description: '', reason_for_exception: '',
+  compensatory_controls: '', exception_end_date: '',
+  assigned_approver: '', risk_owner: '',
+}
+
 function getSavedDraft() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-
+  if (typeof window === 'undefined') return null
   const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY)
-  if (!raw) {
-    return null
-  }
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
 
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
+function normalizeSavedDraft(draft) {
+  if (!draft || typeof draft !== 'object') return draft
+  const value = draft.exception_end_date
+  if (value && value.includes('/')) {
+    return { ...draft, exception_end_date: '' }
   }
+  return draft
 }
 
 function RequiredMark() {
@@ -55,10 +63,16 @@ function parseIsoDate(value) {
 function isFutureCalendarDate(value) {
   const parsed = parseIsoDate(value)
   if (!parsed) return false
-
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
   return parsed.getTime() > today.getTime()
+}
+
+function toDateInputValue(isoString) {
+  if (!isoString) return ''
+  const d = new Date(isoString)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toISOString().slice(0, 10)
 }
 
 const FIELD_LABELS = {
@@ -95,7 +109,6 @@ const FIELD_FIX_HELP = {
   risk_owner: 'Select a risk owner from the list.',
 }
 
-// ─── Zod validation schema ────────────────────────────────────────────────────
 const schema = z.object({
   business_unit:        z.string().min(1, 'Required'),
   exception_type:       z.string().min(1, 'Required'),
@@ -118,7 +131,6 @@ const schema = z.object({
   risk_owner:           z.string().min(1, 'Required'),
 })
 
-// ─── Section wrapper ──────────────────────────────────────────────────────────
 function FormSection({ title, description, children }) {
   return (
     <Card>
@@ -135,17 +147,6 @@ function FormSection({ title, description, children }) {
   )
 }
 
-function normalizeSavedDraft(draft) {
-  if (!draft || typeof draft !== 'object') return draft
-  const value = draft.exception_end_date
-  if (value && value.includes('/')) {
-    // Clear old DD/MM/YYYY drafts
-    return { ...draft, exception_end_date: '' }
-  }
-  return draft
-}
-
-// ─── Reusable Select field ────────────────────────────────────────────────────
 function SelectField({ control, name, label, description, placeholder, options, valueKey = 'id', labelKey, getOptionLabel, required = false, disabled = false }) {
   return (
     <FormField
@@ -178,49 +179,32 @@ function SelectField({ control, name, label, description, placeholder, options, 
   )
 }
 
-// ─── Main page component ──────────────────────────────────────────────────────
-export default function CreateExceptionPage() {
-  const navigate = useNavigate()
-  const [refData, setRefData] = useState(null)
-  const [loadingRef, setLoadingRef] = useState(true)
-  const [refError, setRefError]     = useState(null)
+// ── Inner form — always mounted with correct defaultValues, never needs form.reset ──
+
+function ExceptionFormInner({ navigate, isEditMode, exceptionId, exceptionTitle, defaultValues, refData }) {
   const [submitError, setSubmitError] = useState(null)
   const [loadingApprover, setLoadingApprover] = useState(false)
 
-  const savedDraft = normalizeSavedDraft(getSavedDraft())
-
   const form = useForm({
     resolver: zodResolver(schema),
-    defaultValues: savedDraft ?? {
-      business_unit: '', exception_type: '', risk_issue: '',
-      asset_type: '', asset_purpose: '', data_classification: '',
-      data_components: [], internet_exposure: '',
-      number_of_assets: '', short_description: '', reason_for_exception: '',
-      compensatory_controls: '', exception_end_date: '',
-      assigned_approver: '', risk_owner: '',
-    },
+    defaultValues,
   })
 
-  // Load reference data on mount
-  useEffect(() => {
-    referenceService.getReferenceData()
-      .then(r => setRefData(r.data))
-      .catch(() => setRefError('Failed to load form options. Please refresh.'))
-      .finally(() => setLoadingRef(false))
-  }, [])
+  // Skip first auto-populate run in edit mode; values are already correct from defaultValues.
+  const skipFirst = useRef(isEditMode)
 
-  // Auto-populate approver and risk owner when BU or exception type changes
+  const buWatched = form.watch('business_unit')
+  const etWatched = form.watch('exception_type')
+
   useEffect(() => {
-    const businessUnitId = form.getValues('business_unit')
-    const exceptionTypeId = form.getValues('exception_type')
-    
-    if (!businessUnitId && !exceptionTypeId) {
-      setLoadingApprover(false)
+    if (skipFirst.current) {
+      skipFirst.current = false
       return
     }
+    if (!buWatched && !etWatched) return
 
     setLoadingApprover(true)
-    referenceService.getAssignmentDefaults(businessUnitId, exceptionTypeId)
+    referenceService.getAssignmentDefaults(buWatched, etWatched)
       .then(response => {
         if (response.data.assigned_approver_id) {
           form.setValue('assigned_approver', String(response.data.assigned_approver_id))
@@ -229,19 +213,18 @@ export default function CreateExceptionPage() {
           form.setValue('risk_owner', String(response.data.risk_owner_id))
         }
       })
-      .catch(err => {
-        console.error('Failed to fetch assignment defaults:', err)
-      })
+      .catch(err => console.error('Failed to fetch assignment defaults:', err))
       .finally(() => setLoadingApprover(false))
-  }, [form.watch('business_unit'), form.watch('exception_type')])
+  }, [buWatched, etWatched])
 
+  // Persist form to localStorage (create mode only)
   useEffect(() => {
+    if (isEditMode) return
     const subscription = form.watch((values) => {
       window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(values))
     })
-
     return () => subscription.unsubscribe()
-  }, [form])
+  }, [form, isEditMode])
 
   async function onSubmit(values) {
     setSubmitError(null)
@@ -253,7 +236,6 @@ export default function CreateExceptionPage() {
         return
       }
 
-      // Convert string IDs from Select back to numbers for the API
       const payload = {
         ...values,
         business_unit:       parseInt(values.business_unit),
@@ -265,17 +247,20 @@ export default function CreateExceptionPage() {
         internet_exposure:   parseInt(values.internet_exposure),
         assigned_approver:   parseInt(values.assigned_approver),
         risk_owner:          parseInt(values.risk_owner),
-        // data_components is already an array of numbers
-        // exception_end_date: DD/MM/YYYY string → ISO
-        exception_end_date: parsedEndDate.toISOString(),
+        exception_end_date:  parsedEndDate.toISOString(),
       }
-      await exceptionService.createException(payload)
-      window.localStorage.removeItem(DRAFT_STORAGE_KEY)
-      navigate('/', { state: { message: 'Exception request created successfully.' } })
+
+      if (isEditMode) {
+        await exceptionService.updateException(exceptionId, payload)
+        navigate('/', { state: { message: `Draft #${exceptionId} saved successfully.` } })
+      } else {
+        await exceptionService.createException(payload)
+        window.localStorage.removeItem(DRAFT_STORAGE_KEY)
+        navigate('/', { state: { message: 'Exception request created successfully.' } })
+      }
     } catch (err) {
       const data = err.response?.data
       if (data && typeof data === 'object') {
-        // Map backend field errors back into the form
         Object.entries(data).forEach(([field, msgs]) => {
           if (field in form.getValues()) {
             form.setError(field, { message: Array.isArray(msgs) ? msgs[0] : msgs })
@@ -286,24 +271,6 @@ export default function CreateExceptionPage() {
         setSubmitError('Submission failed. Please try again.')
       }
     }
-  }
-
-  // ── Loading / error states ─────────────────────────────────────────────────
-  if (loadingRef) {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
-      </div>
-    )
-  }
-
-  if (refError) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-4">
-        <p className="text-red-600">{refError}</p>
-        <Button variant="outline" onClick={() => window.location.reload()}>Retry</Button>
-      </div>
-    )
   }
 
   const { business_units, exception_types, risk_issues, asset_types, asset_purposes,
@@ -325,23 +292,26 @@ export default function CreateExceptionPage() {
   }))
   const showErrorSummary = form.formState.submitCount > 0 && errorEntries.length > 0
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-50">
-      {/* Header */}
       <div className="bg-white border-b border-slate-200 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center gap-3">
           <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
-            <h1 className="text-xl font-semibold text-slate-900">New Exception Request</h1>
-            <p className="text-sm text-slate-500">Submit a formal request for a policy exception</p>
+            <h1 className="text-xl font-semibold text-slate-900">
+              {isEditMode ? 'Edit Exception Request' : 'New Exception Request'}
+            </h1>
+            <p className="text-sm text-slate-500">
+              {isEditMode
+                ? `${exceptionTitle} — edit fields below, then submit to restart the approval process`
+                : 'Submit a formal request for a policy exception'}
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Form body */}
       <div className="max-w-4xl mx-auto px-6 py-8">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
@@ -361,7 +331,6 @@ export default function CreateExceptionPage() {
 
             <p className="text-xs text-slate-500">Fields marked with <span className="text-red-600">*</span> are required.</p>
 
-            {/* ── Section 1: Exception Details ────────────────────────────── */}
             <FormSection
               title="Exception Details"
               description="Identify the business context and describe what policy is being excepted."
@@ -395,8 +364,6 @@ export default function CreateExceptionPage() {
                   </FormItem>
                 )}
               />
-
-              {/* Full-width textareas */}
               <FormField
                 control={form.control} name="short_description"
                 render={({ field, fieldState }) => (
@@ -435,7 +402,6 @@ export default function CreateExceptionPage() {
               />
             </FormSection>
 
-            {/* ── Section 2: Risk Assessment ───────────────────────────────── */}
             <FormSection
               title="Risk Assessment"
               description="These fields are used to automatically calculate a risk score for this exception."
@@ -468,8 +434,6 @@ export default function CreateExceptionPage() {
                   </FormItem>
                 )}
               />
-
-              {/* Data Components — multi-select checkboxes */}
               <Controller
                 control={form.control}
                 name="data_components"
@@ -489,7 +453,7 @@ export default function CreateExceptionPage() {
                                 field.onChange(
                                   checked
                                     ? [...field.value, dc.id]
-                                    : field.value.filter(id => id !== dc.id)
+                                    : field.value.filter(i => i !== dc.id)
                                 )
                               }}
                             />
@@ -506,7 +470,6 @@ export default function CreateExceptionPage() {
               />
             </FormSection>
 
-            {/* ── Section 3: Assignment ────────────────────────────────────── */}
             <FormSection
               title="Assignment"
               description="Assign the BU CIO who must approve this exception and the risk owner responsible for its oversight."
@@ -515,17 +478,16 @@ export default function CreateExceptionPage() {
                 control={form.control} name="assigned_approver" label="Assigned Approver (BU CIO)"
                 options={approverOptions} placeholder={loadingApprover ? 'Loading…' : 'Auto-assigned on BU selection'}
                 getOptionLabel={formatUserOption} required
-                disabled={loadingApprover || !!form.watch('assigned_approver')}
+                disabled={loadingApprover || (!isEditMode && !!form.watch('assigned_approver'))}
               />
               <SelectField
                 control={form.control} name="risk_owner" label="Risk Owner"
                 options={riskOwnerOptions} placeholder={loadingApprover ? 'Loading…' : 'Auto-assigned on Exception Type selection'}
                 getOptionLabel={formatUserOption} required
-                disabled={loadingApprover || !!form.watch('risk_owner')}
+                disabled={loadingApprover || (!isEditMode && !!form.watch('risk_owner'))}
               />
             </FormSection>
 
-            {/* ── Submit area ──────────────────────────────────────────────── */}
             {submitError && (
               <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {submitError}
@@ -538,7 +500,9 @@ export default function CreateExceptionPage() {
               </Button>
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {isSubmitting ? 'Submitting…' : 'Create Exception Request'}
+                {isSubmitting
+                  ? (isEditMode ? 'Saving…' : 'Submitting…')
+                  : (isEditMode ? 'Save Changes' : 'Create Exception Request')}
               </Button>
             </div>
 
@@ -546,5 +510,89 @@ export default function CreateExceptionPage() {
         </Form>
       </div>
     </div>
+  )
+}
+
+// ── Outer loader — fetches all data before rendering the form ──
+
+export default function CreateExceptionPage() {
+  const navigate = useNavigate()
+  const { id } = useParams()
+  const isEditMode = !!id
+
+  const [loadState, setLoadState] = useState({ loading: true, error: null, refData: null, excData: null })
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      try {
+        const [refRes, excRes] = await Promise.all([
+          referenceService.getReferenceData(),
+          isEditMode ? exceptionService.getExceptionDetails(id) : Promise.resolve(null),
+        ])
+        if (!cancelled) {
+          setLoadState({ loading: false, error: null, refData: refRes.data, excData: excRes?.data ?? null })
+        }
+      } catch {
+        if (!cancelled) {
+          setLoadState(s => ({ ...s, loading: false, error: 'Failed to load. Please refresh and try again.' }))
+        }
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [isEditMode, id])
+
+  if (loadState.loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
+      </div>
+    )
+  }
+
+  if (loadState.error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen gap-4">
+        <p className="text-red-600">{loadState.error}</p>
+        <Button variant="outline" onClick={() => window.location.reload()}>Retry</Button>
+      </div>
+    )
+  }
+
+  let defaultValues
+  if (isEditMode && loadState.excData) {
+    const exc = loadState.excData
+    defaultValues = {
+      business_unit:         String(exc.business_unit),
+      exception_type:        String(exc.exception_type),
+      risk_issue:            String(exc.risk_issue),
+      asset_type:            String(exc.asset_type),
+      asset_purpose:         String(exc.asset_purpose),
+      data_classification:   String(exc.data_classification),
+      internet_exposure:     String(exc.internet_exposure),
+      number_of_assets:      exc.number_of_assets,
+      short_description:     exc.short_description ?? '',
+      reason_for_exception:  exc.reason_for_exception ?? '',
+      compensatory_controls: exc.compensatory_controls ?? '',
+      exception_end_date:    toDateInputValue(exc.exception_end_date),
+      assigned_approver:     String(exc.assigned_approver),
+      risk_owner:            String(exc.risk_owner),
+      data_components:       (exc.data_components ?? []).map(Number),
+    }
+  } else {
+    defaultValues = normalizeSavedDraft(getSavedDraft()) ?? EMPTY_DEFAULTS
+  }
+
+  return (
+    <ExceptionFormInner
+      key={isEditMode ? `edit-${id}` : 'create'}
+      navigate={navigate}
+      isEditMode={isEditMode}
+      exceptionId={id}
+      exceptionTitle={isEditMode && loadState.excData ? `Draft #${loadState.excData.id}` : ''}
+      defaultValues={defaultValues}
+      refData={loadState.refData}
+    />
   )
 }

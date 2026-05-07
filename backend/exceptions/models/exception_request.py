@@ -40,9 +40,9 @@ class ExceptionRequest(models.Model):
         "Submitted": ["AwaitingRiskOwner", "Approved", "Rejected", "ApprovalDeadlinePassed"],
         "AwaitingRiskOwner": ["Approved", "Rejected", "ApprovalDeadlinePassed"],
         "Approved": ["Closed", "Extended"],       # "Expired" added by remediation branch
-        "Rejected": ["Draft", "Closed", "Modified"],
+        "Rejected": ["Closed", "Modified"],
         "ApprovalDeadlinePassed": ["Draft"],
-        "Expired": [],                             # outgoing transitions added by remediation branch
+        "Expired": ["Extended"],                   # can still request extension within 2-week grace window
         "Modified": [],
         "Extended": [],
         "Closed": [],
@@ -110,6 +110,14 @@ class ExceptionRequest(models.Model):
     )
     risk_owner = models.ForeignKey(
         User, on_delete=models.PROTECT, related_name="risk_owned_exceptions",
+    )
+
+    # ── Lineage ──────────────────────────────────────────────────────────
+    parent_exception = models.ForeignKey(
+        'self',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='derived_requests',
     )
 
     # ── Optimistic Locking ───────────────────────────────────────────────

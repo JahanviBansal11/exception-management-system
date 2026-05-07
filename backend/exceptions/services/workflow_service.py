@@ -340,29 +340,37 @@ class WorkflowService:
         )
 
     @staticmethod
-    def mark_modified(exception_request, user, related_version=None):
+    def mark_modified(exception_request, user, related_version=None, new_exception_id=None):
         """
-        Rejected → Modified. Called when an approved modification supersedes this request.
-        related_version: the version of the new (modifying) exception at time of approval.
+        Rejected → Modified. Called when a modification request supersedes this exception.
+        new_exception_id: ID of the new Draft created to replace this one (stored in audit log).
         """
         if exception_request.status != "Rejected":
             raise ValueError("Only Rejected exceptions can be marked as Modified.")
 
+        details = {"message": "Superseded by a modification request.", "related_version": related_version}
+        if new_exception_id is not None:
+            details["new_exception_id"] = new_exception_id
+
         WorkflowService.change_status(
             exception_request, "Modified", user, "MODIFY",
-            details={"message": "Superseded by an approved modification.", "related_version": related_version},
+            details=details,
         )
 
     @staticmethod
-    def mark_extended(exception_request, user, related_version=None):
+    def mark_extended(exception_request, user, related_version=None, new_exception_id=None):
         """
-        Approved → Extended. Called when an approved extension supersedes this request.
-        related_version: the version of the new (extending) exception at time of approval.
+        Approved | Expired → Extended. Called when an extension request supersedes this exception.
+        new_exception_id: ID of the new Draft created to replace this one (stored in audit log).
         """
-        if exception_request.status != "Approved":
-            raise ValueError("Only Approved exceptions can be marked as Extended.")
+        if exception_request.status not in {"Approved", "Expired"}:
+            raise ValueError("Only Approved or Expired exceptions can be marked as Extended.")
+
+        details = {"message": "Superseded by an extension request.", "related_version": related_version}
+        if new_exception_id is not None:
+            details["new_exception_id"] = new_exception_id
 
         WorkflowService.change_status(
             exception_request, "Extended", user, "EXTEND",
-            details={"message": "Superseded by an approved extension.", "related_version": related_version},
+            details=details,
         )

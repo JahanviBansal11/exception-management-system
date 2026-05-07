@@ -96,6 +96,14 @@ function App() {
         }
       />
       <Route
+        path="/exceptions/:id/edit"
+        element={
+          <ProtectedRoute>
+            <CreateExceptionPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/audit-log"
         element={
           <ProtectedRoute>

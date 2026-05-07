@@ -68,6 +68,35 @@ function statusTone(status) {
   return tones[status] || 'muted'
 }
 
+const DIFF_FIELDS = [
+  { key: 'short_description',        label: 'Short Description' },
+  { key: 'reason_for_exception',     label: 'Reason for Exception' },
+  { key: 'compensatory_controls',    label: 'Compensatory Controls' },
+  { key: 'exception_end_date',       label: 'End Date', format: 'date' },
+  { key: 'number_of_assets',         label: 'Number of Assets' },
+  { key: 'exception_type_name',      label: 'Exception Type' },
+  { key: 'asset_type_name',          label: 'Asset Type' },
+  { key: 'asset_purpose_name',       label: 'Asset Purpose' },
+  { key: 'data_classification_name', label: 'Data Classification' },
+  { key: 'internet_exposure_name',   label: 'Internet Exposure' },
+  { key: 'risk_owner_name',          label: 'Risk Owner' },
+  { key: 'assigned_approver_name',   label: 'Assigned Approver' },
+  { key: 'data_component_names',     label: 'Data Components', format: 'list' },
+]
+
+function computeDiff(current, snapshot) {
+  return DIFF_FIELDS.flatMap(({ key, label, format }) => {
+    const normalise = (val) =>
+      format === 'list'
+        ? (Array.isArray(val) ? val : []).slice().sort().join(', ')
+        : String(val ?? '')
+    const curVal = normalise(current[key])
+    const oldVal = normalise(snapshot[key])
+    if (curVal === oldVal) return []
+    return [{ label, old: oldVal, cur: curVal, format }]
+  })
+}
+
 const AUDIT_ACTION_LABELS = {
   SUBMIT: 'Submitted',
   APPROVE: 'Approved',
@@ -119,7 +148,11 @@ function getAuditSummary(log) {
     summary.push(`End Date: ${fromValue} → ${toValue}`)
   }
 
-  return summary.slice(0, 3)
+  if (details.new_exception_id) {
+    summary.push(`Superseding exception: #${details.new_exception_id}`)
+  }
+
+  return summary.slice(0, 4)
 }
 
 function formatDateTime(value) {
@@ -232,6 +265,15 @@ function DashboardPage({ view }) {
   const [updatingEndDate, setUpdatingEndDate] = useState(false)
   const [showEndDateEditor, setShowEndDateEditor] = useState(false)
   const [showEndDateHistory, setShowEndDateHistory] = useState(false)
+  const [extendLoading, setExtendLoading] = useState(false)
+  const [extendError, setExtendError] = useState('')
+  const [modifyLoading, setModifyLoading] = useState(false)
+  const [modifyError, setModifyError] = useState('')
+  const [closeRejectedLoading, setCloseRejectedLoading] = useState(false)
+  const [closeRejectedError, setCloseRejectedError] = useState('')
+  const [deleteDraftLoading, setDeleteDraftLoading] = useState(false)
+  const [deleteDraftError, setDeleteDraftError] = useState('')
+  const [riskTooltipOpen, setRiskTooltipOpen] = useState(false)
   const [adminUsers, setAdminUsers] = useState([])
   const [adminRoles, setAdminRoles] = useState([])
   const [loadingAdminUsers, setLoadingAdminUsers] = useState(false)
@@ -241,6 +283,7 @@ function DashboardPage({ view }) {
   const [adminStatusFilter, setAdminStatusFilter] = useState('all')
   const [expandedTabs, setExpandedTabs] = useState({
     exceptionDetails: true,
+    diffVsParent: true,
     timeline: false,
     checkpoints: false,
     auditLogs: false,
@@ -423,11 +466,21 @@ function DashboardPage({ view }) {
     setEndDateUpdateError('')
     setShowEndDateEditor(false)
     setShowEndDateHistory(false)
+    setExtendError('')
+    setModifyError('')
+    setCloseRejectedError('')
+    setDeleteDraftError('')
+
   }, [selected])
 
   const availableActions = useMemo(() => {
     if (!selected || !user) return []
-    return Object.entries(ACTION_CONFIG).filter(([key]) => canAct(user, selected, key))
+    const _isSecurity = (user?.groups || []).includes('Security')
+    const _isRequestor = Number(user?.id) === Number(selected.requested_by)
+    const _hideClose = selected.status === 'Approved' && (_isRequestor || _isSecurity)
+    return Object.entries(ACTION_CONFIG)
+      .filter(([key]) => canAct(user, selected, key))
+      .filter(([key]) => !(key === 'close' && _hideClose))
   }, [selected, user])
 
   const sortedItems = useMemo(() => sortExceptions(items, sortKey), [items, sortKey])
@@ -588,6 +641,99 @@ function DashboardPage({ view }) {
     }
   }
 
+  async function requestModification() {
+    if (!selected) return
+    setModifyError('')
+
+    setModifyLoading(true)
+    try {
+      const response = await api.post(`/api/exceptions/${selected.id}/modify/`, {})
+      const newId = response.data.new_exception_id
+      navigate(`/exceptions/${newId}/edit`)
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setModifyError('You do not have permission to request a modification.')
+      } else if (s === 400) {
+        setModifyError(error?.response?.data?.detail || 'Could not create modification.')
+      } else {
+        setModifyError('Failed to create modification. Please try again.')
+      }
+      setModifyLoading(false)
+    }
+  }
+
+  async function requestExtension() {
+    if (!selected) return
+    setExtendError('')
+
+    setExtendLoading(true)
+    try {
+      const response = await api.post(`/api/exceptions/${selected.id}/extend/`, {})
+      const newId = response.data.new_exception_id
+      navigate(`/exceptions/${newId}/edit`)
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setExtendError('You do not have permission to request an extension.')
+      } else if (s === 400) {
+        setExtendError(error?.response?.data?.detail || 'Could not create extension.')
+      } else {
+        setExtendError('Failed to create extension. Please try again.')
+      }
+      setExtendLoading(false)
+    }
+  }
+
+  async function closeRejected() {
+    if (!selected) return
+    if (!window.confirm('Permanently close this rejected exception? This cannot be undone.')) return
+    setCloseRejectedError('')
+
+    setCloseRejectedLoading(true)
+    try {
+      await api.post(`/api/exceptions/${selected.id}/close_rejected/`, {})
+      await loadExceptions()
+      await loadExceptionDetail(selected.id)
+      await loadSummary()
+      await loadNotifications()
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setCloseRejectedError('You do not have permission to close this exception.')
+      } else {
+        setCloseRejectedError('Failed to close exception. Please try again.')
+      }
+    } finally {
+      setCloseRejectedLoading(false)
+    }
+  }
+
+  async function deleteDraft() {
+    if (!selected) return
+    if (!window.confirm('Permanently delete this draft? This cannot be undone.')) return
+    setDeleteDraftError('')
+    setDeleteDraftLoading(true)
+    try {
+      await api.delete(`/api/exceptions/${selected.id}/`)
+      await loadExceptions()
+      setSelectedId(null)
+      setSelected(null)
+      await loadSummary()
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setDeleteDraftError('You do not have permission to delete this draft.')
+      } else if (s === 400) {
+        setDeleteDraftError(error?.response?.data?.detail || 'Only Draft exceptions can be deleted.')
+      } else {
+        setDeleteDraftError('Failed to delete draft. Please try again.')
+      }
+    } finally {
+      setDeleteDraftLoading(false)
+    }
+  }
+
   async function createManagedUser(event) {
     event.preventDefault()
     setAdminError('')
@@ -698,6 +844,36 @@ function DashboardPage({ view }) {
   const canCreateException = view === 'requestor' || view === 'security'
   const notificationBadgeCount = notifications.length
   const canUpdateEndDate = ['approver', 'risk-owner', 'security'].includes(view)
+  const isSecurity = (user?.groups || []).includes('Security')
+  const isRequestor = selected ? Number(user?.id) === Number(selected.requested_by) : false
+  const canModify = selected?.status === 'Rejected' && (isRequestor || isSecurity)
+  const canCloseRejected = selected?.status === 'Rejected' && (isRequestor || isSecurity)
+  const extendWindowInfo = useMemo(() => {
+    if (!selected || !(isRequestor || isSecurity)) return null
+    if (!['Approved', 'Expired'].includes(selected.status)) return null
+    const approvedAt = selected.approved_at ? new Date(selected.approved_at).getTime() : null
+    const endDate = selected.exception_end_date ? new Date(selected.exception_end_date).getTime() : null
+    if (!approvedAt || !endDate) return null
+    const now = Date.now()
+    const midpoint = approvedAt + (endDate - approvedAt) / 2
+    const graceCutoff = endDate + 14 * 24 * 60 * 60 * 1000
+    if (now > graceCutoff) return null
+    if (now < midpoint) return { open: false, opensAt: new Date(midpoint) }
+    return { open: true }
+  }, [selected, isRequestor, isSecurity])
+  const canEditDraft = selected?.status === 'Draft' && (isRequestor || isSecurity)
+  const canDeleteDraft = selected?.status === 'Draft' && (isRequestor || isSecurity)
+  // Whether the current user can navigate to the parent exception.
+  // Risk owners only get access if the parent reached the risk assessment stage (they were involved).
+  // Approvers always can (same approver on parent). Requestors always can (their own exception).
+  const canAccessParent = useMemo(() => {
+    if (!selected?.parent_exception || !selected?.parent_snapshot) return false
+    if (isSecurity) return true
+    if (view === 'requestor') return true
+    if (view === 'approver') return true
+    if (view === 'risk-owner') return Boolean(selected.parent_snapshot?.parent_reached_risk_owner)
+    return false
+  }, [selected, isSecurity, view])
 
   return (
     <div className="shell">
@@ -1126,12 +1302,127 @@ function DashboardPage({ view }) {
                     <div className="detail-grid">
                       <div><strong>ID:</strong> #{selected.id}</div>
                       <div><strong>Status:</strong> <span className={`badge badge-${statusTone(selected.status)}`}>{selected.status}</span></div>
-                      <div><strong>Risk:</strong> {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})</div>
+                      <div>
+                        <strong>Risk:</strong>{' '}
+                        {selected.risk_rating || 'Pending'} ({selected.risk_score ?? '—'})
+                        {selected.asset_type_name ? (
+                          <span style={{ position: 'relative', display: 'inline-block', marginLeft: '5px', verticalAlign: 'middle' }}>
+                            <span
+                              onMouseEnter={() => setRiskTooltipOpen(true)}
+                              onMouseLeave={() => setRiskTooltipOpen(false)}
+                              style={{ cursor: 'default', color: '#6b7280', fontSize: '0.7rem', border: '1px solid #d1d5db', borderRadius: '50%', width: '13px', height: '13px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1, userSelect: 'none' }}
+                            >
+                              i
+                            </span>
+                            {riskTooltipOpen ? (
+                              <div style={{ position: 'absolute', top: '50%', left: 'calc(100% + 6px)', transform: 'translateY(-50%)', zIndex: 200, background: 'white', border: '1px solid #e5e7eb', borderRadius: '0.375rem', padding: '6px 8px', width: '190px', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', fontSize: '0.72rem', lineHeight: '1.6', pointerEvents: 'none', whiteSpace: 'normal' }}>
+                                <div style={{ fontWeight: '600', marginBottom: '3px', color: '#374151' }}>
+                                  {selected.risk_rating ? 'Risk Factors' : 'Contributing Factors (rating pending)'}
+                                </div>
+                                {selected.asset_type_name ? <div><span style={{ color: '#6b7280' }}>Asset Type: </span>{selected.asset_type_name}</div> : null}
+                                {selected.asset_purpose_name ? <div><span style={{ color: '#6b7280' }}>Asset Purpose: </span>{selected.asset_purpose_name}</div> : null}
+                                {selected.data_classification_name ? <div><span style={{ color: '#6b7280' }}>Classification: </span>{selected.data_classification_name}</div> : null}
+                                {selected.internet_exposure_name ? <div><span style={{ color: '#6b7280' }}>Internet Exposure: </span>{selected.internet_exposure_name}</div> : null}
+                                {selected.data_component_names?.length > 0 ? <div><span style={{ color: '#6b7280' }}>Data Components: </span>{selected.data_component_names.join(', ')}</div> : null}
+                              </div>
+                            ) : null}
+                          </span>
+                        ) : null}
+                      </div>
                       <div><strong>Business Unit:</strong> {selected.business_unit_code ? `${selected.business_unit_code} (${selected.business_unit_name})` : selected.business_unit}</div>
                       <div><strong>Created By:</strong> {selected.requested_by} ({selected.requested_by_username || '—'})</div>
                       <div><strong>Assigned Approver:</strong> {selected.assigned_approver} ({selected.assigned_approver_username || '—'})</div>
                       <div><strong>Risk Owner:</strong> {selected.risk_owner} ({selected.risk_owner_username || '—'})</div>
+                      {selected.parent_exception ? (
+                        <div>
+                          <strong>Parent Exception:</strong>{' '}
+                          {canAccessParent ? (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ width: 'auto', fontWeight: 'normal', padding: '2px 8px', fontSize: '0.8rem' }}
+                              onClick={() => setSelectedId(selected.parent_exception)}
+                            >
+                              #{selected.parent_exception} ↗
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '0.875rem', color: '#374151' }}>#{selected.parent_exception}</span>
+                          )}
+                        </div>
+                      ) : null}
+                      {selected.derived_request_ids?.length > 0 ? (
+                        <div style={{ gridColumn: 'span 2' }}>
+                          <strong>Superseded by:</strong>{' '}
+                          {selected.derived_request_ids.map(childId => (
+                            <button
+                              key={childId}
+                              className="btn btn-secondary"
+                              style={{ width: 'auto', fontWeight: 'normal', padding: '2px 8px', fontSize: '0.8rem', marginLeft: '6px' }}
+                              onClick={() => setSelectedId(childId)}
+                            >
+                              #{childId} ↗
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
+
+                    {selected.parent_snapshot ? (() => {
+                      const diffs = computeDiff(selected, selected.parent_snapshot)
+                      const parentStatus = selected.parent_snapshot.parent_status
+                      const parentReachedRiskOwner = selected.parent_snapshot.parent_reached_risk_owner
+                      const showRiskOwnerNote = view === 'risk-owner' && !parentReachedRiskOwner
+                      return (
+                        <div style={{ marginTop: '16px', borderTop: '1px solid #e5e7eb', paddingTop: '4px' }}>
+                          <div
+                            style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '8px 0' }}
+                            onClick={() => toggleTab('diffVsParent')}
+                          >
+                            <span style={{ fontSize: '1.1em', transition: 'transform 0.2s', transform: expandedTabs.diffVsParent ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                            <strong style={{ fontSize: '0.875rem' }}>
+                              Changes vs. Parent #{selected.parent_exception}
+                              {diffs.length > 0 ? <span style={{ marginLeft: '6px', fontWeight: 'normal', color: '#6b7280' }}>({diffs.length} changed)</span> : null}
+                            </strong>
+                          </div>
+                          {expandedTabs.diffVsParent ? (
+                            <>
+                              {showRiskOwnerNote ? (
+                                <div style={{ marginBottom: '8px', padding: '8px 10px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '0.375rem', fontSize: '0.78rem', color: '#64748b', lineHeight: '1.5' }}>
+                                  This request is a modification of Exception #{selected.parent_exception}
+                                  {parentStatus ? ` (status: ${parentStatus})` : ''}.
+                                  {' '}The original was declined before reaching the risk assessment stage — you were not involved in that process. The field changes below reflect what was updated before resubmission.
+                                </div>
+                              ) : null}
+                              {diffs.length === 0 ? (
+                                <div className="meta" style={{ paddingBottom: '8px' }}>No field changes — this is a pure extension with identical fields.</div>
+                              ) : (
+                                <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '8px', fontSize: '0.8rem' }}>
+                                  <thead>
+                                    <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px', width: '22%', color: '#6b7280' }}>Field</th>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px', width: '39%', color: '#6b7280' }}>Before (parent)</th>
+                                      <th style={{ textAlign: 'left', padding: '4px 8px', width: '39%', color: '#6b7280' }}>After (this request)</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {diffs.map(({ label, old, cur, format }) => (
+                                      <tr key={label} style={{ borderBottom: '1px solid #f3f4f6', background: '#fffbeb' }}>
+                                        <td style={{ padding: '5px 8px', fontWeight: '600', verticalAlign: 'top' }}>{label}</td>
+                                        <td style={{ padding: '5px 8px', color: '#dc2626', verticalAlign: 'top', whiteSpace: format === 'list' ? 'normal' : 'pre-wrap', wordBreak: 'break-word' }}>
+                                          {format === 'date' && old ? formatDateTime(old) : (old || '—')}
+                                        </td>
+                                        <td style={{ padding: '5px 8px', color: '#15803d', verticalAlign: 'top', whiteSpace: format === 'list' ? 'normal' : 'pre-wrap', wordBreak: 'break-word' }}>
+                                          {format === 'date' && cur ? formatDateTime(cur) : (cur || '—')}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </>
+                          ) : null}
+                        </div>
+                      )
+                    })() : null}
                   </div>
                 )}
               </div>
@@ -1163,7 +1454,7 @@ function DashboardPage({ view }) {
                   ) : null}
 
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: showActionNotesBox ? '8px' : 0 }}>
-                    {availableActions.length === 0 ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
+                    {availableActions.length === 0 && !canModify && !canCloseRejected && !extendWindowInfo && !canEditDraft && !canDeleteDraft ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
                     {availableActions.map(([actionKey, config]) => (
                       <button
                         key={actionKey}
@@ -1175,8 +1466,72 @@ function DashboardPage({ view }) {
                         {actionRequiresNotes(actionKey, selected) ? <span className="error" style={{ display: 'inline', marginLeft: '4px', marginBottom: 0 }}>*</span> : null}
                       </button>
                     ))}
+                    {canModify ? (
+                      <button
+                        className="btn"
+                        style={{ width: 'auto' }}
+                        onClick={requestModification}
+                        disabled={modifyLoading}
+                      >
+                        {modifyLoading ? 'Creating...' : 'Request Modification'}
+                      </button>
+                    ) : null}
+                    {canCloseRejected ? (
+                      <button
+                        className="btn btn-secondary"
+                        style={{ width: 'auto' }}
+                        onClick={closeRejected}
+                        disabled={closeRejectedLoading}
+                      >
+                        {closeRejectedLoading ? 'Closing...' : 'Close Request'}
+                      </button>
+                    ) : null}
+                    {extendWindowInfo ? (
+                      extendWindowInfo.open ? (
+                        <button
+                          className="btn"
+                          style={{ width: 'auto' }}
+                          onClick={requestExtension}
+                          disabled={extendLoading}
+                        >
+                          {extendLoading ? 'Creating...' : 'Request Extension'}
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-secondary"
+                          style={{ width: 'auto', cursor: 'not-allowed', opacity: 0.65 }}
+                          disabled
+                          title={`Extension window opens at ${formatDateTimeCompact(extendWindowInfo.opensAt)}`}
+                        >
+                          Request Extension (opens {formatDateTime(extendWindowInfo.opensAt)})
+                        </button>
+                      )
+                    ) : null}
+                    {canEditDraft ? (
+                      <button
+                        className="btn"
+                        style={{ width: 'auto' }}
+                        onClick={() => navigate(`/exceptions/${selected.id}/edit`)}
+                      >
+                        Edit Draft
+                      </button>
+                    ) : null}
+                    {canDeleteDraft ? (
+                      <button
+                        className="btn btn-secondary"
+                        style={{ width: 'auto', color: '#dc2626', borderColor: '#dc2626' }}
+                        onClick={deleteDraft}
+                        disabled={deleteDraftLoading}
+                      >
+                        {deleteDraftLoading ? 'Deleting...' : 'Delete Draft'}
+                      </button>
+                    ) : null}
                   </div>
                   {actionError ? <div className="error" style={{ marginTop: '8px' }}>{actionError}</div> : null}
+                  {modifyError ? <div className="error" style={{ marginTop: '8px' }}>{modifyError}</div> : null}
+                  {extendError ? <div className="error" style={{ marginTop: '8px' }}>{extendError}</div> : null}
+                  {closeRejectedError ? <div className="error" style={{ marginTop: '8px' }}>{closeRejectedError}</div> : null}
+                  {deleteDraftError ? <div className="error" style={{ marginTop: '8px' }}>{deleteDraftError}</div> : null}
                 </div>
               </div>
 
@@ -1344,6 +1699,9 @@ function DashboardPage({ view }) {
                     <div style={{ paddingTop: '12px' }}>
                       <div className="meta" style={{ marginBottom: '10px' }}>
                         Full status history for this exception. Security only.
+                        {auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND').length > 0
+                          ? ` · ${auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND').length} superseding request(s) recorded.`
+                          : null}
                       </div>
 
                       {loadingAuditLogs ? <div className="meta">Loading audit logs...</div> : null}

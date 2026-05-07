@@ -120,23 +120,46 @@ class WorklistNotificationsView(APIView):
                 feedback = details.get("feedback")
 
                 event_map = {
-                    "REJECT": ("request_rejected", "danger", "Request rejected"),
-                    "APPROVE": ("request_approved", "info", "Request approved"),
-                    "EXPIRE": ("request_expired", "warning", "Request expired"),
-                    "CLOSE": ("request_closed", "info", "Request closed"),
+                    "REJECT":  ("request_rejected",  "danger",  "Request rejected"),
+                    "APPROVE": ("request_approved",  "info",    "Request approved"),
+                    "EXPIRE":  ("request_expired",   "warning", "Approval deadline passed"),
+                    "CLOSE":   ("request_closed",    "info",    "Request closed"),
+                    "MODIFY":  ("request_modified",  "info",    "Modification created"),
+                    "EXTEND":  ("request_extended",  "info",    "Extension requested"),
                 }
                 event_type, severity, title = event_map.get(
                     log.action_type, ("request_updated", "info", "Request updated")
                 )
-                message = details.get("message") or (
-                    f"Exception #{log.exception_request_id}: "
-                    f"{actor_label} changed request to {log.new_status or log.action_type}."
-                )
-                if feedback:
-                    message = f"{message} Feedback: {feedback}"
+
+                new_exc_id = details.get("new_exception_id")
+                if log.action_type == "REJECT":
+                    message = (
+                        f"Exception #{log.exception_request_id} was rejected by {actor_label}."
+                        " You can now request a modification from your dashboard."
+                    )
+                    if feedback:
+                        message += f" Feedback: {feedback}"
+                elif log.action_type == "APPROVE":
+                    message = (
+                        f"Exception #{log.exception_request_id} has been approved."
+                        " You can request an extension at any time before it expires."
+                    )
+                elif log.action_type == "MODIFY":
+                    draft_ref = f" Draft #{new_exc_id} is ready to edit and submit." if new_exc_id else ""
+                    message = f"Exception #{log.exception_request_id} was marked as modified.{draft_ref}"
+                elif log.action_type == "EXTEND":
+                    draft_ref = f" Draft #{new_exc_id} is ready to edit and submit." if new_exc_id else ""
+                    message = f"Exception #{log.exception_request_id} was marked as extended.{draft_ref}"
+                else:
+                    message = details.get("message") or (
+                        f"Exception #{log.exception_request_id}: "
+                        f"{actor_label} changed request to {log.new_status or log.action_type}."
+                    )
+                    if feedback:
+                        message += f" Feedback: {feedback}"
                 events.append({
                     "event_type": event_type, "severity": severity, "title": title,
-                    "message": f"Exception #{log.exception_request_id}: {message}",
+                    "message": message,
                     "exception_id": log.exception_request_id,
                     "status": log.new_status, "feedback": feedback,
                     "timestamp": log.timestamp,

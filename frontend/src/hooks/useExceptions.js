@@ -14,11 +14,8 @@ export function matchesView(item, view, userId) {
   if (view === 'approver') return item.assigned_approver === userId
   if (view === 'risk-owner') {
     if (item.risk_owner !== userId) return false
-    if (item.status === 'AwaitingRiskOwner') return true
-    if (['Approved', 'Rejected', 'ApprovalDeadlinePassed', 'Expired', 'Modified', 'Extended', 'Closed'].includes(item.status)) {
-      return reachedRiskOwnerStage(item)
-    }
-    return false
+    // Backend already gates on checkpoint presence; trust its queryset here
+    return ['AwaitingRiskOwner', 'Approved', 'Rejected', 'ApprovalDeadlinePassed', 'Expired', 'Modified', 'Extended', 'Closed'].includes(item.status)
   }
 
   return false

@@ -69,7 +69,11 @@ function getAuditSummary(log) {
     summary.push(`End Date: ${fromValue} → ${toValue}`)
   }
 
-  return summary.slice(0, 3)
+  if (details.new_exception_id) {
+    summary.push(`Superseding exception: #${details.new_exception_id}`)
+  }
+
+  return summary.slice(0, 4)
 }
 
 export default function AuditLogPage() {
@@ -379,6 +383,33 @@ export default function AuditLogPage() {
             {selectedExceptionDetail.approved_at && (
               <div><strong>Approved At:</strong> {formatDateTime(selectedExceptionDetail.approved_at)}</div>
             )}
+            {selectedExceptionDetail.parent_exception ? (
+              <div>
+                <strong>Parent Exception:</strong>{' '}
+                <button
+                  className="btn btn-secondary"
+                  style={{ width: 'auto', fontWeight: 'normal', padding: '2px 8px', fontSize: '0.8rem' }}
+                  onClick={() => handleViewDetail(selectedExceptionDetail.parent_exception)}
+                >
+                  #{selectedExceptionDetail.parent_exception} → View Timeline
+                </button>
+              </div>
+            ) : null}
+            {selectedExceptionDetail.derived_request_ids?.length > 0 ? (
+              <div style={{ gridColumn: 'span 2' }}>
+                <strong>Superseded by:</strong>{' '}
+                {selectedExceptionDetail.derived_request_ids.map(childId => (
+                  <button
+                    key={childId}
+                    className="btn btn-secondary"
+                    style={{ width: 'auto', fontWeight: 'normal', padding: '2px 8px', fontSize: '0.8rem', marginLeft: '6px' }}
+                    onClick={() => handleViewDetail(childId)}
+                  >
+                    #{childId} → View Timeline
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       )}
