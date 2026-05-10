@@ -3,7 +3,8 @@ import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useNavigate } from 'react-router-dom'
-import { api } from './api'
+import { referenceService } from '../../services/referenceService'
+import { exceptionService } from '../../services/exceptionService'
 
 import {
   Form, FormField, FormItem, FormLabel, FormControl, FormDescription, FormMessage,
@@ -44,78 +45,20 @@ function RequiredMark() {
   return <span className="ml-1 text-red-600">*</span>
 }
 
-function parseYyyyMmDdToDate(value) {
+function parseIsoDate(value) {
   if (!value || typeof value !== 'string') return null
-  const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/)
-  if (!match) return null
-
-  const year = Number(match[1])
-  const month = Number(match[2])
-  const day = Number(match[3])
-  const parsed = new Date(year, month - 1, day, 0, 0, 0, 0)
-
-  if (
-    Number.isNaN(parsed.getTime()) ||
-    parsed.getFullYear() !== year ||
-    parsed.getMonth() !== month - 1 ||
-    parsed.getDate() !== day
-  ) {
-    return null
-  }
-
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return null
   return parsed
-}
-
-function parseDdMmYyyyToDate(value) {
-  if (!value || typeof value !== 'string') return null
-  const match = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
-  if (!match) return null
-
-  const day = Number(match[1])
-  const month = Number(match[2])
-  const year = Number(match[3])
-  const parsed = new Date(year, month - 1, day, 0, 0, 0, 0)
-
-  if (
-    Number.isNaN(parsed.getTime()) ||
-    parsed.getFullYear() !== year ||
-    parsed.getMonth() !== month - 1 ||
-    parsed.getDate() !== day
-  ) {
-    return null
-  }
-
-  return parsed
-}
-
-function parseExceptionEndDate(value) {
-  return parseYyyyMmDdToDate(value) || parseDdMmYyyyToDate(value)
 }
 
 function isFutureCalendarDate(value) {
-  const parsed = parseExceptionEndDate(value)
+  const parsed = parseIsoDate(value)
   if (!parsed) return false
 
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
   return parsed.getTime() > today.getTime()
-}
-
-function toYyyyMmDd(value) {
-  const parsed = parseExceptionEndDate(value)
-  if (parsed) {
-    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`
-  }
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-function getTomorrowDateString() {
-  const today = new Date()
-  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1, 0, 0, 0, 0)
-  return `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`
 }
 
 const FIELD_LABELS = {
@@ -139,7 +82,7 @@ const FIELD_FIX_HELP = {
   business_unit: 'Select a business unit from the dropdown.',
   exception_type: 'Select an exception type.',
   risk_issue: 'Select the related risk/issue.',
-  exception_end_date: 'Choose a future date using the calendar.',
+  exception_end_date: 'Select a future date from the calendar.',
   short_description: 'Enter at least 10 characters.',
   reason_for_exception: 'Enter at least 20 characters explaining the reason.',
   asset_type: 'Select an asset type.',
@@ -169,7 +112,7 @@ const schema = z.object({
   exception_end_date:   z
     .string()
     .min(1, 'Required')
-    .refine((value) => parseExceptionEndDate(value) !== null, 'Use the date picker to select a valid date')
+    .refine((value) => parseIsoDate(value) !== null, 'Invalid date format')
     .refine((value) => isFutureCalendarDate(value), 'Date must be in the future'),
   assigned_approver:    z.string().min(1, 'Required'),
   risk_owner:           z.string().min(1, 'Required'),
@@ -195,16 +138,11 @@ function FormSection({ title, description, children }) {
 function normalizeSavedDraft(draft) {
   if (!draft || typeof draft !== 'object') return draft
   const value = draft.exception_end_date
-  if (!value || typeof value !== 'string') return draft
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return draft
-
-  const normalized = toYyyyMmDd(value)
-  if (!normalized) return draft
-
-  return {
-    ...draft,
-    exception_end_date: normalized,
+  if (value && value.includes('/')) {
+    // Clear old DD/MM/YYYY drafts
+    return { ...draft, exception_end_date: '' }
   }
+  return draft
 }
 
 // ─── Reusable Select field ────────────────────────────────────────────────────
@@ -265,32 +203,37 @@ export default function CreateExceptionPage() {
 
   // Load reference data on mount
   useEffect(() => {
-    api.get('/api/reference/')
+    referenceService.getReferenceData()
       .then(r => setRefData(r.data))
       .catch(() => setRefError('Failed to load form options. Please refresh.'))
       .finally(() => setLoadingRef(false))
   }, [])
 
-  // Auto-populate assigned_approver when business_unit changes
+  // Auto-populate approver and risk owner when BU or exception type changes
   useEffect(() => {
     const businessUnitId = form.getValues('business_unit')
-    if (!businessUnitId) {
-      form.setValue('assigned_approver', '')
+    const exceptionTypeId = form.getValues('exception_type')
+    
+    if (!businessUnitId && !exceptionTypeId) {
       setLoadingApprover(false)
       return
     }
 
     setLoadingApprover(true)
-    api.get(`/api/exceptions/get_approver_by_bu/?business_unit_id=${businessUnitId}`)
+    referenceService.getAssignmentDefaults(businessUnitId, exceptionTypeId)
       .then(response => {
-        form.setValue('assigned_approver', String(response.data.assigned_approver_id))
+        if (response.data.assigned_approver_id) {
+          form.setValue('assigned_approver', String(response.data.assigned_approver_id))
+        }
+        if (response.data.risk_owner_id) {
+          form.setValue('risk_owner', String(response.data.risk_owner_id))
+        }
       })
       .catch(err => {
-        console.error('Failed to fetch approver:', err)
-        form.setValue('assigned_approver', '')
+        console.error('Failed to fetch assignment defaults:', err)
       })
       .finally(() => setLoadingApprover(false))
-  }, [form.watch('business_unit')])
+  }, [form.watch('business_unit'), form.watch('exception_type')])
 
   useEffect(() => {
     const subscription = form.watch((values) => {
@@ -303,9 +246,9 @@ export default function CreateExceptionPage() {
   async function onSubmit(values) {
     setSubmitError(null)
     try {
-      const parsedEndDate = parseExceptionEndDate(values.exception_end_date)
+      const parsedEndDate = parseIsoDate(values.exception_end_date)
       if (!parsedEndDate) {
-        form.setError('exception_end_date', { message: 'Use the date picker to select a valid date' })
+        form.setError('exception_end_date', { message: 'Invalid date format' })
         setSubmitError('Please fix the errors above.')
         return
       }
@@ -326,7 +269,7 @@ export default function CreateExceptionPage() {
         // exception_end_date: DD/MM/YYYY string → ISO
         exception_end_date: parsedEndDate.toISOString(),
       }
-      await api.post('/api/exceptions/', payload)
+      await exceptionService.createException(payload)
       window.localStorage.removeItem(DRAFT_STORAGE_KEY)
       navigate('/', { state: { message: 'Exception request created successfully.' } })
     } catch (err) {
@@ -374,7 +317,6 @@ export default function CreateExceptionPage() {
   }
 
   const isSubmitting = form.formState.isSubmitting
-  const minSelectableEndDate = getTomorrowDateString()
   const errorEntries = Object.entries(form.formState.errors).map(([fieldName, fieldError]) => ({
     fieldName,
     label: FIELD_LABELS[fieldName] ?? fieldName,
@@ -444,12 +386,11 @@ export default function CreateExceptionPage() {
                     <FormControl>
                       <Input
                         type="date"
-                        min={minSelectableEndDate}
                         className={fieldState.error ? 'border-red-500 ring-1 ring-red-500' : ''}
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription>Select a future date</FormDescription>
+                    <FormDescription>Select a future date from the calendar</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -572,14 +513,15 @@ export default function CreateExceptionPage() {
             >
               <SelectField
                 control={form.control} name="assigned_approver" label="Assigned Approver (BU CIO)"
-                options={approverOptions} placeholder="Select approver"
+                options={approverOptions} placeholder={loadingApprover ? 'Loading…' : 'Auto-assigned on BU selection'}
                 getOptionLabel={formatUserOption} required
-                             disabled={loadingApprover}
+                disabled={loadingApprover || !!form.watch('assigned_approver')}
               />
               <SelectField
                 control={form.control} name="risk_owner" label="Risk Owner"
-                options={riskOwnerOptions} placeholder="Select risk owner"
+                options={riskOwnerOptions} placeholder={loadingApprover ? 'Loading…' : 'Auto-assigned on Exception Type selection'}
                 getOptionLabel={formatUserOption} required
+                disabled={loadingApprover || !!form.watch('risk_owner')}
               />
             </FormSection>
 

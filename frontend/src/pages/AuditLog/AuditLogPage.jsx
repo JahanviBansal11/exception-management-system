@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, useLocation } from 'react-router-dom'
-import { api } from './api'
-import { useAuth } from './useAuth.js'
+import { useNavigate } from 'react-router-dom'
+import { securityService } from '../../services/securityService'
+import { exceptionService } from '../../services/exceptionService'
+import { useAuth } from '../../useAuth.js'
 
 function formatDateTime(value) {
   if (!value) return '—'
@@ -22,7 +23,9 @@ const ACTION_LABELS = {
   APPROVE: 'Approved',
   REJECT: 'Rejected',
   CLOSE: 'Closed',
-  EXPIRE: 'Expired',
+  EXPIRE: 'Deadline Passed',
+  MODIFY: 'Modified',
+  EXTEND: 'Extended',
   REMIND: 'Reminder Sent',
   ESCALATE: 'Escalated',
   UPDATE: 'Updated',
@@ -70,7 +73,7 @@ function getAuditSummary(log) {
 }
 
 export default function AuditLogPage() {
-  const { user, logout } = useAuth()
+  const { logout } = useAuth()
   const navigate = useNavigate()
 
   const [view, setView] = useState('list') // 'list' or 'detail'
@@ -95,13 +98,11 @@ export default function AuditLogPage() {
     setLoading(true)
     setError('')
     try {
-      const params = new URLSearchParams({
+      const response = await securityService.getAuditList({
         sort_by: sortBy,
         limit: pageSize,
         offset: page * pageSize,
       })
-
-      const response = await api.get(`/api/security/audit-list/?${params.toString()}`)
       setExceptions(response.data.results || [])
       setTotalCount(response.data.count || 0)
     } catch (err) {
@@ -121,12 +122,12 @@ export default function AuditLogPage() {
     setDetailLoading(true)
     setDetailError('')
     try {
-      const response = await api.get(`/api/exceptions/${exceptionId}/`)
+      const response = await exceptionService.getExceptionDetails(exceptionId)
       setSelectedExceptionDetail(response.data)
 
-      const auditResponse = await api.get(`/api/exceptions/${exceptionId}/audit_logs/?limit=100`)
+      const auditResponse = await exceptionService.getAuditLogs(exceptionId, 100)
       setDetailLogs(auditResponse.data.results || [])
-    } catch (err) {
+    } catch (_err) {
       setDetailError('Failed to load exception details.')
       setSelectedExceptionDetail(null)
       setDetailLogs([])

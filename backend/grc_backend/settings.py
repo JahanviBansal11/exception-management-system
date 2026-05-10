@@ -22,7 +22,7 @@ environ.Env.read_env(os.path.join(BASE_DIR, '.env'), overwrite=True)
 SECRET_KEY = env('SECRET_KEY')
 DEBUG = env('DEBUG')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
 
 # Application definition
 INSTALLED_APPS = [
@@ -83,6 +83,8 @@ DATABASES = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
 ]
 
 FRONTEND_BASE_URL = env('FRONTEND_BASE_URL', default='http://localhost:5173').rstrip('/')
@@ -131,14 +133,8 @@ SIMPLE_JWT = {
 # ============================================
 # CELERY CONFIGURATION
 # ============================================
-CELERY_TASK_ALWAYS_EAGER = env.bool(
-    'CELERY_TASK_ALWAYS_EAGER',
-    default=False,
-)
-CELERY_TASK_EAGER_PROPAGATES = env.bool(
-    'CELERY_TASK_EAGER_PROPAGATES',
-    default=True,
-)
+CELERY_TASK_ALWAYS_EAGER = True  # Run tasks synchronously (no Redis needed)
+CELERY_TASK_EAGER_PROPAGATES = True  # Raise exceptions immediately
 CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='redis://localhost:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']

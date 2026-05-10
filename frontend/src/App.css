@@ -65,16 +65,14 @@
 
 .shell {
   min-height: 100vh;
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: clamp(14px, 1.6vw, 22px);
+  padding: 20px;
 }
 
 .shell-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .meta {
@@ -85,15 +83,15 @@
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin: 0 0 16px;
+  gap: 12px;
+  margin: 0 0 20px;
 }
 
 .summary-card {
   border: 1px solid #ddd;
   border-radius: 12px;
   background: #fff;
-  padding: 12px;
+  padding: 14px;
 }
 
 .summary-card-clickable {
@@ -117,22 +115,22 @@
 }
 
 .summary-value {
-  margin-top: 4px;
-  font-size: clamp(20px, 1.5vw, 24px);
+  margin-top: 6px;
+  font-size: 22px;
   font-weight: 700;
   color: #111;
 }
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr;
-  gap: 16px;
+  grid-template-columns: minmax(320px, 420px) 1fr;
+  gap: 20px;
 }
 
 .panel {
   border: 1px solid #ddd;
   border-radius: 12px;
-  padding: 14px;
+  padding: 18px;
   background: #fff;
 }
 
@@ -140,7 +138,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .list-controls {
@@ -213,18 +211,18 @@
 .list-stack,
 .checkpoint-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .notification-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .notification-item {
   border: 1px solid #e4e4e7;
   border-radius: 10px;
-  padding: 10px;
+  padding: 12px;
   background: #fff;
   text-align: left;
   cursor: pointer;
@@ -238,7 +236,7 @@
 .checkpoint-item {
   border: 1px solid #e4e4e7;
   border-radius: 10px;
-  padding: 12px;
+  padding: 14px;
   background: #fff;
   text-align: left;
 }
@@ -256,8 +254,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
 .badge {
@@ -297,11 +295,11 @@
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
 .section-block {
-  margin-top: 14px;
+  margin-top: 18px;
 }
 
 .section-block p {
@@ -383,189 +381,18 @@
 }
 
 .notification-dock-panel {
-  width: min(380px, calc(100vw - 28px));
-  max-height: min(62vh, 560px);
+  width: min(460px, calc(100vw - 40px));
+  max-height: min(70vh, 620px);
   border: 1px solid #ddd;
   border-radius: 12px;
   background: #fff;
-  padding: 12px;
+  padding: 14px;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
 }
 
 .notification-list-scroll {
   max-height: 52vh;
   overflow-y: auto;
-}
-
-.notification-item-actions {
-  margin-top: 10px;
-  display: flex;
-  gap: 8px;
-}
-
-.notification-dismiss-btn {
-  margin-left: auto;
-}
-
-.checkpoint-stepper {
-  display: grid;
-  gap: 6px;
-}
-
-.checkpoint-stepper-item {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  column-gap: 10px;
-  align-items: center;
-  position: relative;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-soft);
-}
-
-.checkpoint-stepper-dot {
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elevated);
-  color: var(--text-muted);
-}
-
-.checkpoint-stepper-dot-completed {
-  background: var(--success-bg);
-  color: var(--success-text);
-  border-color: color-mix(in srgb, var(--success-text) 35%, var(--success-bg));
-}
-
-.checkpoint-stepper-dot-active {
-  background: var(--info-bg);
-  color: var(--info-text);
-  border-color: color-mix(in srgb, var(--info-text) 35%, var(--info-bg));
-}
-
-.checkpoint-stepper-dot-pending {
-  background: var(--muted-bg);
-  color: var(--muted-text);
-  border-color: var(--border-strong);
-}
-
-.checkpoint-stepper-dot-skipped {
-  background: var(--warning-bg);
-  color: var(--warning-text);
-  border-color: color-mix(in srgb, var(--warning-text) 35%, var(--warning-bg));
-}
-
-.checkpoint-stepper-dot-escalated {
-  background: var(--danger-bg);
-  color: var(--danger-text);
-  border-color: color-mix(in srgb, var(--danger-text) 35%, var(--danger-bg));
-}
-
-.checkpoint-stepper-texts {
-  min-width: 0;
-}
-
-.checkpoint-stepper-label {
-  font-size: 13px;
-  color: var(--text);
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-.checkpoint-stepper-state {
-  margin-top: 2px;
-  font-size: 11px;
-  line-height: 1.3;
-  text-transform: capitalize;
-}
-
-.checkpoint-stepper-state-completed {
-  color: var(--success-text);
-}
-
-.checkpoint-stepper-state-active {
-  color: var(--info-text);
-}
-
-.checkpoint-stepper-state-pending {
-  color: var(--muted-text);
-}
-
-.checkpoint-stepper-state-skipped {
-  color: var(--warning-text);
-}
-
-.checkpoint-stepper-state-escalated {
-  color: var(--danger-text);
-}
-
-.checkpoint-stepper-line {
-  position: absolute;
-  left: 22px;
-  top: calc(100% + 1px);
-  width: 2px;
-  height: 6px;
-  background: var(--border);
-  pointer-events: none;
-}
-
-.tooltip-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-
-.tooltip-trigger {
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--bg-elevated);
-  color: var(--text-muted);
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  cursor: help;
-  padding: 0;
-}
-
-.tooltip-content {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: calc(100% + 8px);
-  min-width: 260px;
-  max-width: 320px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
-  font-size: 12px;
-  line-height: 1.35;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
-  z-index: 30;
-}
-
-.tooltip-content-wide {
-  min-width: 320px;
-  max-width: 420px;
-}
-
-.tooltip-wrap:hover .tooltip-content,
-.tooltip-wrap:focus-within .tooltip-content {
-  opacity: 1;
 }
 
 .admin-form {
@@ -686,10 +513,6 @@
 
   .detail-grid {
     grid-template-columns: 1fr;
-  }
-
-  .checkpoint-stepper-item {
-    padding: 6px;
   }
 
   .admin-form {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { api, clearTokens, getAccessToken, setTokens } from './api'
+import { api, clearTokens, getAccessToken, setTokens } from './services/apiClient'
 import { AuthContext } from './AuthContext'
 
 export function AuthProvider({ children }) {

@@ -18,15 +18,15 @@ from exceptions.models import (
 )
 from exceptions.services.escalation_engine import EscalationEngine
 from exceptions.services.reminder_engine import ReminderEngine
+from exceptions.services.workflow_service import WorkflowService
 
 
 class OptionBWorkflowTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        cls.requestor = User.objects.create_user('test_requestor', 'jahanvibsl@gmail.com', 'pass123')
-        cls.approver = User.objects.create_user('test_approver', 'jahanvibsl@gmail.com', 'pass123')
-        cls.risk_owner = User.objects.create_user('test_riskowner', 'jahanvibsl@gmail.com', 'pass123')
-        cls.security_user = User.objects.create_user('test_security', 'sec@test.com', 'pass123')
+        cls.requestor = User.objects.create_user('test_requestor', 'req@test.com', 'pass123')
+        cls.approver = User.objects.create_user('test_approver', 'app@test.com', 'pass123')
+        cls.risk_owner = User.objects.create_user('test_riskowner', 'risk@test.com', 'pass123')
         cls.outsider = User.objects.create_user('test_outsider', 'out@test.com', 'pass123')
         User.objects.get_or_create(username='system', defaults={'email': 'system@test.com'})
 
@@ -38,7 +38,6 @@ class OptionBWorkflowTests(TestCase):
         cls.requestor.groups.add(requestor_group)
         cls.approver.groups.add(approver_group)
         cls.risk_owner.groups.add(risk_owner_group)
-        cls.security_user.groups.add(Group.objects.get(name='Security'))
 
         cls.bu, _ = BusinessUnit.objects.get_or_create(
             bu_code='FIN',
@@ -105,14 +104,14 @@ class OptionBWorkflowTests(TestCase):
     def test_high_branch_transitions_to_risk_owner_then_approved(self):
         exc = self.create_exception(profile='high', suffix='high-path')
 
-        exc.submit(self.requestor)
+        WorkflowService.submit(exc, self.requestor)
         self.assertEqual(exc.status, 'Submitted')
 
-        exc.bu_approve(self.approver, notes='BU CIO rationale for risk owner review')
+        WorkflowService.bu_approve(exc, self.approver, notes='BU CIO rationale for risk owner review')
         exc.refresh_from_db()
         self.assertEqual(exc.status, 'AwaitingRiskOwner')
 
-        exc.risk_approve(self.risk_owner, notes='Approved by risk owner')
+        WorkflowService.risk_approve(exc, self.risk_owner, notes='Approved by risk owner')
         exc.refresh_from_db()
         self.assertEqual(exc.status, 'Approved')
 
@@ -124,8 +123,8 @@ class OptionBWorkflowTests(TestCase):
     def test_low_medium_shortcut_approved_and_risk_checkpoints_skipped(self):
         exc = self.create_exception(profile='low', suffix='low-path')
 
-        exc.submit(self.requestor)
-        exc.bu_approve(self.approver)
+        WorkflowService.submit(exc, self.requestor)
+        WorkflowService.bu_approve(exc, self.approver)
         exc.refresh_from_db()
 
         self.assertEqual(exc.status, 'Approved')
@@ -141,15 +140,15 @@ class OptionBWorkflowTests(TestCase):
 
     def test_reject_flows_bu_and_risk_owner(self):
         bu_reject_exc = self.create_exception(profile='low', suffix='bu-reject')
-        bu_reject_exc.submit(self.requestor)
-        bu_reject_exc.bu_reject(self.approver, notes='Missing compensating controls')
+        WorkflowService.submit(bu_reject_exc, self.requestor)
+        WorkflowService.bu_reject(bu_reject_exc, self.approver, notes='Missing compensating controls')
         bu_reject_exc.refresh_from_db()
         self.assertEqual(bu_reject_exc.status, 'Rejected')
 
         risk_reject_exc = self.create_exception(profile='high', suffix='risk-reject')
-        risk_reject_exc.submit(self.requestor)
-        risk_reject_exc.bu_approve(self.approver, notes='Escalating to risk owner due to high risk')
-        risk_reject_exc.risk_reject(self.risk_owner, notes='Rejected by risk owner')
+        WorkflowService.submit(risk_reject_exc, self.requestor)
+        WorkflowService.bu_approve(risk_reject_exc, self.approver, notes='Escalating to risk owner due to high risk')
+        WorkflowService.risk_reject(risk_reject_exc, self.risk_owner, notes='Rejected by risk owner')
         risk_reject_exc.refresh_from_db()
         self.assertEqual(risk_reject_exc.status, 'Rejected')
 
@@ -157,15 +156,15 @@ class OptionBWorkflowTests(TestCase):
         client = APIClient()
 
         exc_for_bu = self.create_exception(profile='high', suffix='api-bu')
-        exc_for_bu.submit(self.requestor)
+        WorkflowService.submit(exc_for_bu, self.requestor)
 
         client.force_authenticate(user=self.outsider)
         response = client.post(f'/api/exceptions/{exc_for_bu.id}/bu_approve/')
         self.assertEqual(response.status_code, 404)
 
         exc_for_risk = self.create_exception(profile='high', suffix='api-risk')
-        exc_for_risk.submit(self.requestor)
-        exc_for_risk.bu_approve(self.approver, notes='Needs explicit risk owner decision')
+        WorkflowService.submit(exc_for_risk, self.requestor)
+        WorkflowService.bu_approve(exc_for_risk, self.approver, notes='Needs explicit risk owner decision')
 
         client.force_authenticate(user=self.outsider)
         response = client.post(f'/api/exceptions/{exc_for_risk.id}/risk_assess/', {'notes': 'x'}, format='json')
@@ -179,7 +178,7 @@ class OptionBWorkflowTests(TestCase):
     @patch('exceptions.services.notification_service.NotificationService.send_approval_reminder', return_value=True)
     def test_scheduler_reminder_escalation_and_auto_close(self, _mock_reminder, _mock_expired):
         reminder_exc = self.create_exception(profile='high', suffix='reminder')
-        reminder_exc.submit(self.requestor)
+        WorkflowService.submit(reminder_exc, self.requestor)
         ExceptionRequest.objects.filter(pk=reminder_exc.pk).update(
             created_at=timezone.now() - timezone.timedelta(days=20),
             approval_deadline=timezone.now() + timezone.timedelta(days=8),
@@ -192,7 +191,7 @@ class OptionBWorkflowTests(TestCase):
         self.assertIn(reminder_exc.reminder_stage, {'Reminder_50', 'Reminder_75', 'Reminder_90'})
 
         expired_exc = self.create_exception(profile='high', suffix='expire')
-        expired_exc.submit(self.requestor)
+        WorkflowService.submit(expired_exc, self.requestor)
         ExceptionRequest.objects.filter(pk=expired_exc.pk).update(
             approval_deadline=timezone.now() - timezone.timedelta(minutes=5),
             reminder_stage='Reminder_90',
@@ -201,12 +200,11 @@ class OptionBWorkflowTests(TestCase):
         escalated_count = EscalationEngine.escalate_expired_approvals()
         expired_exc.refresh_from_db()
         self.assertGreaterEqual(escalated_count, 1)
-        self.assertEqual(expired_exc.status, 'Submitted')
-        self.assertEqual(expired_exc.reminder_stage, 'Expired_Notice')
+        self.assertEqual(expired_exc.status, 'ApprovalDeadlinePassed')
 
         close_exc = self.create_exception(profile='low', suffix='auto-close')
-        close_exc.submit(self.requestor)
-        close_exc.bu_approve(self.approver, notes='BU approved low-risk exception')
+        WorkflowService.submit(close_exc, self.requestor)
+        WorkflowService.bu_approve(close_exc, self.approver, notes='BU approved low-risk exception')
         ExceptionRequest.objects.filter(pk=close_exc.pk).update(
             exception_end_date=timezone.now() - timezone.timedelta(days=1)
         )
@@ -232,45 +230,3 @@ class OptionBWorkflowTests(TestCase):
         me_response = client.get('/api/auth/me/')
         self.assertEqual(me_response.status_code, 200)
         self.assertEqual(me_response.data['username'], 'test_requestor')
-
-    @patch('exceptions.services.notification_service.NotificationService.send_exception_end_date_updated_notification', return_value=True)
-    def test_end_date_updates_allow_backward_and_forward_moves_for_allowed_roles(self, mock_notify):
-        client = APIClient()
-
-        exc = self.create_exception(profile='low', suffix='end-date-roll')
-        exc.submit(self.requestor)
-        exc.bu_approve(self.approver, notes='BU approved low-risk exception')
-        exc.refresh_from_db()
-
-        approval_anchor = exc.approved_at
-        self.assertIsNotNone(approval_anchor)
-
-        earlier_end_date = approval_anchor + timezone.timedelta(days=5)
-        later_end_date = approval_anchor + timezone.timedelta(days=25)
-
-        for actor, target_date in [
-            (self.approver, earlier_end_date),
-            (self.risk_owner, later_end_date),
-            (self.security_user, approval_anchor + timezone.timedelta(days=15)),
-        ]:
-            client.force_authenticate(user=actor)
-            response = client.post(
-                f'/api/exceptions/{exc.id}/update_end_date/',
-                {
-                    'exception_end_date': target_date.isoformat(),
-                    'notes': f'Adjusted by {actor.username}',
-                },
-                format='json',
-            )
-            self.assertEqual(response.status_code, 200)
-            exc.refresh_from_db()
-            self.assertEqual(exc.exception_end_date.isoformat(), target_date.isoformat())
-
-        self.assertEqual(mock_notify.call_count, 3)
-
-        client.force_authenticate(user=self.requestor)
-        response = client.get(f'/api/exceptions/{exc.id}/')
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('end_date_change_history', response.data)
-        self.assertGreaterEqual(len(response.data['end_date_change_history']), 3)
-

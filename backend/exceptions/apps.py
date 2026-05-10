@@ -6,4 +6,4 @@ class ExceptionsConfig(AppConfig):
     name = 'exceptions'
 
     def ready(self):
-        import exceptions.signals
+        import exceptions.signals  # noqa: F401
