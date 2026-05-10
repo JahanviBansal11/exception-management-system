@@ -86,10 +86,11 @@ const DIFF_FIELDS = [
 
 function computeDiff(current, snapshot) {
   return DIFF_FIELDS.flatMap(({ key, label, format }) => {
-    const normalise = (val) =>
-      format === 'list'
-        ? (Array.isArray(val) ? val : []).slice().sort().join(', ')
-        : String(val ?? '')
+    const normalise = (val) => {
+      if (format === 'list') return (Array.isArray(val) ? val : []).slice().sort().join(', ')
+      if (format === 'date') return val ? formatDateTime(val) : ''
+      return String(val ?? '')
+    }
     const curVal = normalise(current[key])
     const oldVal = normalise(snapshot[key])
     if (curVal === oldVal) return []
@@ -102,7 +103,6 @@ const AUDIT_ACTION_LABELS = {
   APPROVE: 'Approved',
   REJECT: 'Rejected',
   CLOSE: 'Closed',
-  EXPIRE: 'Deadline Passed',
   MODIFY: 'Modified',
   EXTEND: 'Extended',
   REMIND: 'Reminder Sent',
@@ -110,8 +110,11 @@ const AUDIT_ACTION_LABELS = {
   UPDATE: 'Updated',
 }
 
-function getAuditActionLabel(actionType) {
-  return AUDIT_ACTION_LABELS[actionType] || actionType || 'Updated'
+function getAuditActionLabel(log) {
+  if (log.action_type === 'EXPIRE') {
+    return log.new_status === 'Expired' ? 'Exception Expired' : 'Approval Deadline Passed'
+  }
+  return AUDIT_ACTION_LABELS[log.action_type] || log.action_type || 'Updated'
 }
 
 function getAuditSummary(log) {
@@ -267,6 +270,9 @@ function DashboardPage({ view }) {
   const [showEndDateHistory, setShowEndDateHistory] = useState(false)
   const [extendLoading, setExtendLoading] = useState(false)
   const [extendError, setExtendError] = useState('')
+  const [remediateLoading, setRemediateLoading] = useState(false)
+  const [remediateError, setRemediateError] = useState('')
+  const [remediateNotes, setRemediateNotes] = useState('')
   const [modifyLoading, setModifyLoading] = useState(false)
   const [modifyError, setModifyError] = useState('')
   const [closeRejectedLoading, setCloseRejectedLoading] = useState(false)
@@ -467,6 +473,8 @@ function DashboardPage({ view }) {
     setShowEndDateEditor(false)
     setShowEndDateHistory(false)
     setExtendError('')
+    setRemediateError('')
+    setRemediateNotes('')
     setModifyError('')
     setCloseRejectedError('')
     setDeleteDraftError('')
@@ -685,6 +693,44 @@ function DashboardPage({ view }) {
     }
   }
 
+  async function remediateAndClose() {
+    if (!selected) return
+    const notes = remediateNotes.trim()
+    if (!notes) {
+      setRemediateError('Remediation notes are required.')
+      return
+    }
+    if (!window.confirm('Remediate and permanently close this exception? This cannot be undone.')) return
+    setRemediateError('')
+    setRemediateLoading(true)
+    try {
+      await api.post(`/api/exceptions/${selected.id}/remediate/`, { notes })
+      await loadExceptions()
+      await loadExceptionDetail(selected.id)
+      await loadSummary()
+      await loadNotifications()
+      setRemediateNotes('')
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setRemediateError('You do not have permission to remediate this exception.')
+      } else if (s === 400) {
+        const detail = error?.response?.data
+        if (typeof detail?.detail === 'string') {
+          setRemediateError(detail.detail)
+        } else if (detail?.notes) {
+          setRemediateError(Array.isArray(detail.notes) ? detail.notes[0] : String(detail.notes))
+        } else {
+          setRemediateError('Could not remediate exception.')
+        }
+      } else {
+        setRemediateError('Failed to remediate. Please try again.')
+      }
+    } finally {
+      setRemediateLoading(false)
+    }
+  }
+
   async function closeRejected() {
     if (!selected) return
     if (!window.confirm('Permanently close this rejected exception? This cannot be undone.')) return
@@ -848,6 +894,7 @@ function DashboardPage({ view }) {
   const isRequestor = selected ? Number(user?.id) === Number(selected.requested_by) : false
   const canModify = selected?.status === 'Rejected' && (isRequestor || isSecurity)
   const canCloseRejected = selected?.status === 'Rejected' && (isRequestor || isSecurity)
+  const canRemediate = selected?.status === 'Expired' && (isRequestor || isSecurity)
   const extendWindowInfo = useMemo(() => {
     if (!selected || !(isRequestor || isSecurity)) return null
     if (!['Approved', 'Expired'].includes(selected.status)) return null
@@ -1454,7 +1501,7 @@ function DashboardPage({ view }) {
                   ) : null}
 
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: showActionNotesBox ? '8px' : 0 }}>
-                    {availableActions.length === 0 && !canModify && !canCloseRejected && !extendWindowInfo && !canEditDraft && !canDeleteDraft ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
+                    {availableActions.length === 0 && !canModify && !canCloseRejected && !extendWindowInfo && !canEditDraft && !canDeleteDraft && !canRemediate ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
                     {availableActions.map(([actionKey, config]) => (
                       <button
                         key={actionKey}
@@ -1532,6 +1579,31 @@ function DashboardPage({ view }) {
                   {extendError ? <div className="error" style={{ marginTop: '8px' }}>{extendError}</div> : null}
                   {closeRejectedError ? <div className="error" style={{ marginTop: '8px' }}>{closeRejectedError}</div> : null}
                   {deleteDraftError ? <div className="error" style={{ marginTop: '8px' }}>{deleteDraftError}</div> : null}
+
+                  {canRemediate ? (
+                    <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #e5e7eb' }}>
+                      <div className="meta" style={{ marginBottom: '6px', fontWeight: 500 }}>Remediate &amp; Close</div>
+                      <div className="meta" style={{ marginBottom: '8px' }}>
+                        Document the remediation steps taken and permanently close this exception. This cannot be undone.
+                      </div>
+                      <textarea
+                        placeholder="Describe the remediation steps taken (required)"
+                        value={remediateNotes}
+                        onChange={(e) => setRemediateNotes(e.target.value)}
+                        rows={3}
+                        style={{ width: '100%', boxSizing: 'border-box', marginBottom: '8px', padding: '8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '0.875rem', resize: 'vertical' }}
+                      />
+                      <button
+                        className="btn btn-secondary"
+                        style={{ width: 'auto', color: '#dc2626', borderColor: '#dc2626' }}
+                        onClick={remediateAndClose}
+                        disabled={remediateLoading || !remediateNotes.trim()}
+                      >
+                        {remediateLoading ? 'Closing...' : 'Remediate & Close'}
+                      </button>
+                      {remediateError ? <div className="error" style={{ marginTop: '8px' }}>{remediateError}</div> : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -1714,7 +1786,7 @@ function DashboardPage({ view }) {
                         {auditLogs.map((log) => (
                           <div key={log.id} className="checkpoint-item">
                             <div className="list-card-top">
-                              <span><strong>{getAuditActionLabel(log.action_type)}</strong></span>
+                              <span><strong>{getAuditActionLabel(log)}</strong></span>
                               <span className="badge badge-info">audit</span>
                             </div>
                             <div className="meta">By: {log.performed_by_name || log.performed_by || 'System'}</div>

@@ -56,15 +56,28 @@ def escalate_expired_approvals(self):
 
 
 @shared_task(bind=True, max_retries=3)
-def close_expired_exceptions(self):
-    """Every hour: auto-close approved exceptions past their end date."""
+def expire_active_exceptions(self):
+    """Every hour: mark Approved exceptions past their end date as Expired."""
     try:
         from exceptions.services.escalation_engine import EscalationEngine
-        count = EscalationEngine.close_expired_exceptions()
-        logger.info("close_expired_exceptions: %s exceptions closed.", count)
-        return {"status": "success", "closed_count": count}
+        count = EscalationEngine.expire_active_exceptions()
+        logger.info("expire_active_exceptions: %s exceptions marked Expired.", count)
+        return {"status": "success", "expired_count": count}
     except Exception as exc:
-        logger.error("close_expired_exceptions failed: %s", exc)
+        logger.error("expire_active_exceptions failed: %s", exc)
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def notify_unresolved_expired_exceptions(self):
+    """Every hour: notify risk owner for Expired exceptions past their 14-day grace window."""
+    try:
+        from exceptions.services.escalation_engine import EscalationEngine
+        count = EscalationEngine.notify_unresolved_expired_exceptions()
+        logger.info("notify_unresolved_expired_exceptions: %s notifications sent.", count)
+        return {"status": "success", "notified_count": count}
+    except Exception as exc:
+        logger.error("notify_unresolved_expired_exceptions failed: %s", exc)
         raise self.retry(exc=exc, countdown=300)
 
 

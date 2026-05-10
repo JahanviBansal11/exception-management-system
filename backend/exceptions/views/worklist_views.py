@@ -122,14 +122,18 @@ class WorklistNotificationsView(APIView):
                 event_map = {
                     "REJECT":  ("request_rejected",  "danger",  "Request rejected"),
                     "APPROVE": ("request_approved",  "info",    "Request approved"),
-                    "EXPIRE":  ("request_expired",   "warning", "Approval deadline passed"),
                     "CLOSE":   ("request_closed",    "info",    "Request closed"),
                     "MODIFY":  ("request_modified",  "info",    "Modification created"),
                     "EXTEND":  ("request_extended",  "info",    "Extension requested"),
                 }
-                event_type, severity, title = event_map.get(
-                    log.action_type, ("request_updated", "info", "Request updated")
-                )
+                if log.action_type == "EXPIRE" and log.new_status == "Expired":
+                    event_type, severity, title = "request_expired", "warning", "Exception expired"
+                elif log.action_type == "EXPIRE":
+                    event_type, severity, title = "approval_deadline_passed", "danger", "Approval deadline passed"
+                else:
+                    event_type, severity, title = event_map.get(
+                        log.action_type, ("request_updated", "info", "Request updated")
+                    )
 
                 new_exc_id = details.get("new_exception_id")
                 if log.action_type == "REJECT":
@@ -150,6 +154,11 @@ class WorklistNotificationsView(APIView):
                 elif log.action_type == "EXTEND":
                     draft_ref = f" Draft #{new_exc_id} is ready to edit and submit." if new_exc_id else ""
                     message = f"Exception #{log.exception_request_id} was marked as extended.{draft_ref}"
+                elif log.action_type == "EXPIRE" and log.new_status == "Expired":
+                    message = (
+                        f"Exception #{log.exception_request_id} has expired."
+                        " You have 14 days from the expiry date to extend or remediate and close."
+                    )
                 else:
                     message = details.get("message") or (
                         f"Exception #{log.exception_request_id}: "

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"c:/Users/HOME/exception-management-system\" diff HEAD -- frontend/src/pages/dashboard/DashboardPage.jsx)"
+    ]
+  }
+}

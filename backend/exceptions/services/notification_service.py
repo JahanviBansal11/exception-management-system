@@ -252,6 +252,86 @@ class NotificationService:
             return False
 
     @staticmethod
+    def send_exception_expired_notification(exception_request) -> bool:
+        """Notify requestor and Security team that an exception has expired and needs action."""
+        try:
+            from django.contrib.auth.models import Group
+            requester = exception_request.requested_by
+            recipients = []
+            if requester and requester.email:
+                recipients.append(requester.email)
+
+            security_group = Group.objects.filter(name="Security").first()
+            if security_group:
+                security_emails = list(
+                    security_group.user_set.filter(is_active=True)
+                    .exclude(email="")
+                    .values_list("email", flat=True)
+                )
+                recipients.extend(security_emails)
+
+            if not recipients:
+                logger.warning("No recipients for expiry notification on exception #%s", exception_request.id)
+                return False
+
+            html = _render(_TEMPLATE_EXCEPTION_EXPIRED, {
+                "exception": exception_request,
+                "requester": requester,
+                "end_date": exception_request.exception_end_date,
+                "risk_rating": exception_request.risk_rating,
+                "requestor_link": _portal_link("requestor", exception_request.id),
+                "security_link": _portal_link("security", exception_request.id),
+            })
+            _send(
+                f"[ACTION REQUIRED] Exception Expired: {exception_request.short_description[:50]}",
+                html, list(dict.fromkeys(recipients)),  # deduplicate while preserving order
+            )
+            logger.info(
+                "Expiry notification → %s (exception #%s)", recipients, exception_request.id
+            )
+            return True
+        except Exception as exc:
+            logger.error("Failed expiry notification for #%s: %s", exception_request.id, exc)
+            return False
+
+    @staticmethod
+    def send_overdue_expired_notification(exception_request) -> bool:
+        """
+        Notify risk owner that an Expired exception's 14-day grace window has passed
+        with no extension or remediation. Urgent for High/Critical, standard for Low/Medium.
+        """
+        try:
+            risk_owner = exception_request.risk_owner
+            if not risk_owner or not risk_owner.email:
+                logger.warning("No risk owner email for overdue expiry on exception #%s", exception_request.id)
+                return False
+
+            is_urgent = exception_request.risk_rating in {"High", "Critical"}
+            template = _TEMPLATE_OVERDUE_EXPIRED_URGENT if is_urgent else _TEMPLATE_OVERDUE_EXPIRED_STANDARD
+            subject_prefix = "[URGENT ACTION REQUIRED]" if is_urgent else "[ACTION REQUIRED]"
+
+            html = _render(template, {
+                "exception": exception_request,
+                "risk_owner": risk_owner,
+                "requester": exception_request.requested_by,
+                "end_date": exception_request.exception_end_date,
+                "risk_rating": exception_request.risk_rating,
+                "review_link": _portal_link("risk-owner", exception_request.id),
+            })
+            _send(
+                f"{subject_prefix} Unresolved Expired Exception: {exception_request.short_description[:50]}",
+                html, [risk_owner.email],
+            )
+            logger.info(
+                "Overdue expiry notification (%s) → %s (exception #%s)",
+                "urgent" if is_urgent else "standard", risk_owner.email, exception_request.id,
+            )
+            return True
+        except Exception as exc:
+            logger.error("Failed overdue expiry notification for #%s: %s", exception_request.id, exc)
+            return False
+
+    @staticmethod
     def send_approval_reminder(exception_request, reminder_type: str) -> bool:
         """
         Approval window reminder (50/75/90%) — not yet implemented.
@@ -345,4 +425,58 @@ _TEMPLATE_ACTIVE_EXPIRY = """
 </div>
 <p>Please plan remediation or extension actions before expiry.</p>
 <p><a href="{{ review_link }}" style="padding:10px 20px;background:#f97316;color:#fff;text-decoration:none;border-radius:4px;">Open Exception</a></p>
+"""
+
+_TEMPLATE_EXCEPTION_EXPIRED = """
+<h2>Exception Expired — Action Required</h2>
+<p>Hello {{ requester.first_name }},</p>
+<p>The following exception has passed its end date and is now <strong>Expired</strong>.</p>
+<div style="border:1px solid #e53e3e;padding:15px;margin:20px 0;background:#fff5f5;">
+  <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
+  <p><strong>Description:</strong> {{ exception.short_description }}</p>
+  <p><strong>Risk Rating:</strong> {{ risk_rating }}</p>
+  <p><strong>Expired On:</strong> {{ end_date|date:"M d, Y H:i" }}</p>
+  <p><strong>Business Unit:</strong> {{ exception.business_unit.name }}</p>
+</div>
+<p>You have <strong>14 days</strong> from the expiry date to either:</p>
+<ul>
+  <li><strong>Request an extension</strong> — submit a new exception request covering the continued need.</li>
+  <li><strong>Remediate and close</strong> — document the remediation steps taken and close the exception.</li>
+</ul>
+<p>If no action is taken within 14 days, the risk owner will be notified to follow up.</p>
+<p><a href="{{ requestor_link }}" style="padding:10px 20px;background:#e53e3e;color:#fff;text-decoration:none;border-radius:4px;">Take Action</a></p>
+"""
+
+_TEMPLATE_OVERDUE_EXPIRED_URGENT = """
+<h2 style="color:#dc2626;">URGENT — Unresolved Expired Exception Requires Immediate Attention</h2>
+<p>Hello {{ risk_owner.first_name }},</p>
+<p>The following <strong>{{ risk_rating }}</strong> risk exception expired more than 14 days ago.
+   The requestor has neither extended nor remediated it. <strong>Immediate action is required.</strong></p>
+<div style="border:2px solid #dc2626;padding:15px;margin:20px 0;background:#fff5f5;">
+  <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
+  <p><strong>Description:</strong> {{ exception.short_description }}</p>
+  <p><strong>Risk Rating:</strong> <span style="color:#dc2626;font-weight:bold;">{{ risk_rating }}</span></p>
+  <p><strong>Expired On:</strong> {{ end_date|date:"M d, Y" }}</p>
+  <p><strong>Requestor:</strong> {{ requester.get_full_name }}</p>
+  <p><strong>Business Unit:</strong> {{ exception.business_unit.name }}</p>
+</div>
+<p>As risk owner, please contact the requestor immediately and ensure the underlying risk is mitigated.</p>
+<p><a href="{{ review_link }}" style="padding:10px 20px;background:#dc2626;color:#fff;text-decoration:none;border-radius:4px;">Review Exception</a></p>
+"""
+
+_TEMPLATE_OVERDUE_EXPIRED_STANDARD = """
+<h2>Unresolved Expired Exception — Action Required</h2>
+<p>Hello {{ risk_owner.first_name }},</p>
+<p>The following <strong>{{ risk_rating }}</strong> risk exception expired more than 14 days ago
+   without an extension or remediation being submitted by the requestor.</p>
+<div style="border:1px solid #d97706;padding:15px;margin:20px 0;background:#fffbeb;">
+  <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
+  <p><strong>Description:</strong> {{ exception.short_description }}</p>
+  <p><strong>Risk Rating:</strong> {{ risk_rating }}</p>
+  <p><strong>Expired On:</strong> {{ end_date|date:"M d, Y" }}</p>
+  <p><strong>Requestor:</strong> {{ requester.get_full_name }}</p>
+  <p><strong>Business Unit:</strong> {{ exception.business_unit.name }}</p>
+</div>
+<p>Please follow up with the requestor to ensure the risk is being addressed.</p>
+<p><a href="{{ review_link }}" style="padding:10px 20px;background:#d97706;color:#fff;text-decoration:none;border-radius:4px;">Review Exception</a></p>
 """

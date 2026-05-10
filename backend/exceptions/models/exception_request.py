@@ -13,12 +13,14 @@ class ExceptionRequest(models.Model):
     Core exception request aggregate.
 
     Lifecycle (managed exclusively by WorkflowService):
-        Draft → Submitted → Approved → Closed | Extended
-        Draft → Submitted → AwaitingRiskOwner → Approved → Closed | Extended
-        Any pending stage → Rejected | ApprovalDeadlinePassed
-        Rejected → Modified   (modification/extension branch: MODIFY audit action)
-        Rejected → Closed     (requestor gives up — no further action)
-        Approved → Expired    (remediation branch: exception_end_date passed)
+        Draft → Submitted → Approved → Expired → Closed (remediation)
+                                     → Extended (new draft within grace window)
+        Draft → Submitted → AwaitingRiskOwner → Approved → (same as above)
+        Any pending stage → ApprovalDeadlinePassed
+        Rejected → Modified | Closed
+        Approved → Expired    scheduled hourly once exception_end_date passes
+        Expired  → Extended   14-day grace window; requestor submits new draft
+        Expired  → Closed     requestor documents remediation and closes
     """
 
     # ── Status Constants ────────────────────────────────────────────────
@@ -39,10 +41,10 @@ class ExceptionRequest(models.Model):
         "Draft": ["Submitted"],
         "Submitted": ["AwaitingRiskOwner", "Approved", "Rejected", "ApprovalDeadlinePassed"],
         "AwaitingRiskOwner": ["Approved", "Rejected", "ApprovalDeadlinePassed"],
-        "Approved": ["Closed", "Extended"],       # "Expired" added by remediation branch
+        "Approved": ["Closed", "Extended", "Expired"],
         "Rejected": ["Closed", "Modified"],
         "ApprovalDeadlinePassed": ["Draft"],
-        "Expired": ["Extended"],                   # can still request extension within 2-week grace window
+        "Expired": ["Extended", "Closed"],         # Extended: 14-day grace window; Closed: remediation
         "Modified": [],
         "Extended": [],
         "Closed": [],
@@ -54,6 +56,7 @@ class ExceptionRequest(models.Model):
         ('Reminder_75', '75% of approval window'),
         ('Reminder_90', '90% of approval window'),
         ('Expired_Notice', 'Expired notification sent'),
+        ('Overdue_Expired_Notice', 'Overdue expired — 14-day grace window passed'),
     ]
 
     RISK_RATING_CHOICES = [

@@ -18,6 +18,30 @@ from exceptions.permissions import IsSecurity, RISK_OWNER_GROUP_NAMES, SECURITY_
 from .helpers import get_visible_exceptions
 
 
+def _apply_time_based_transitions(queryset):
+    """
+    Run expiry transitions synchronously against the given queryset.
+    Called on every list/retrieve so statuses stay accurate without Celery.
+    Celery Beat duplicates this proactively in production but is not required.
+    """
+    from exceptions.services.escalation_engine import EscalationEngine
+    now = timezone.now()
+
+    has_expired = queryset.filter(
+        status="Approved", exception_end_date__lt=now
+    ).exists()
+    has_deadline_passed = queryset.filter(
+        status__in=["Submitted", "AwaitingRiskOwner"],
+        approval_deadline__isnull=False,
+        approval_deadline__lt=now,
+    ).exists()
+
+    if has_expired:
+        EscalationEngine.expire_active_exceptions()
+    if has_deadline_passed:
+        EscalationEngine.escalate_expired_approvals()
+
+
 class ExceptionRequestViewSet(viewsets.ModelViewSet):
     serializer_class = ExceptionRequestSerializer
     permission_classes = [IsAuthenticated]
@@ -62,6 +86,16 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             )
 
         return qs
+
+    def list(self, request, *args, **kwargs):
+        qs, _ = get_visible_exceptions(request.user)
+        _apply_time_based_transitions(qs)
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        _apply_time_based_transitions(ExceptionRequest.objects.filter(pk=instance.pk))
+        return super().retrieve(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         serializer.save(requested_by=self.request.user)
@@ -232,6 +266,21 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
                 "message": "Extension created. Edit and submit the new draft.",
                 "new_exception_id": new_exc.id,
             })
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
+    def remediate(self, request, pk=None):
+        """Expired → Closed. Requestor documents remediation and closes the exception."""
+        exception = self.get_object()
+        if exception.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can remediate an exception.")
+        notes = (request.data.get("notes") or "").strip()
+        if not notes:
+            raise ValidationError({"notes": "Remediation notes are required."})
+        try:
+            WorkflowService.remediate(exception, request.user, notes)
+            return Response({"message": "Exception remediated and closed."})
         except ValueError as e:
             raise ValidationError(str(e))
 

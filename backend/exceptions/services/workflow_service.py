@@ -321,6 +321,17 @@ class WorkflowService:
         )
 
     @staticmethod
+    def mark_active_expired(exception_request, user):
+        """Approved → Expired. Called by EscalationEngine when exception_end_date passes."""
+        if exception_request.status != "Approved":
+            raise ValueError("Only Approved exceptions can be marked as Expired.")
+
+        WorkflowService.change_status(
+            exception_request, "Expired", user, "EXPIRE",
+            details={"message": "Exception end date passed — pending extension or remediation."},
+        )
+
+    @staticmethod
     def close(exception_request, user):
         """Approved → Closed."""
         if exception_request.status != "Approved":
@@ -355,6 +366,24 @@ class WorkflowService:
         WorkflowService.change_status(
             exception_request, "Modified", user, "MODIFY",
             details=details,
+        )
+
+    @staticmethod
+    def remediate(exception_request, user, notes):
+        """Expired → Closed. Requestor documents remediation steps and closes the exception."""
+        if exception_request.status != "Expired":
+            raise ValueError("Only Expired exceptions can be remediated and closed.")
+
+        notes = (notes or "").strip()
+        if not notes:
+            raise ValueError("Remediation notes are required.")
+
+        WorkflowService.change_status(
+            exception_request, "Closed", user, "CLOSE",
+            details={
+                "message": "Exception closed via remediation.",
+                "remediation_notes": notes,
+            },
         )
 
     @staticmethod
