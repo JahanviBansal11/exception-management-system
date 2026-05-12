@@ -3,6 +3,9 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from datetime import timedelta
+
+from django.db import transaction
 from django.db.models import Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -13,6 +16,30 @@ from exceptions.serializers import ExceptionRequestSerializer, ExceptionRequestL
 from exceptions.services.workflow_service import WorkflowService
 from exceptions.permissions import IsSecurity, RISK_OWNER_GROUP_NAMES, SECURITY_GROUP_NAME
 from .helpers import get_visible_exceptions
+
+
+def _apply_time_based_transitions(queryset):
+    """
+    Run expiry transitions synchronously against the given queryset.
+    Called on every list/retrieve so statuses stay accurate without Celery.
+    Celery Beat duplicates this proactively in production but is not required.
+    """
+    from exceptions.services.escalation_engine import EscalationEngine
+    now = timezone.now()
+
+    has_expired = queryset.filter(
+        status="Approved", exception_end_date__lt=now
+    ).exists()
+    has_deadline_passed = queryset.filter(
+        status__in=["Submitted", "AwaitingRiskOwner"],
+        approval_deadline__isnull=False,
+        approval_deadline__lt=now,
+    ).exists()
+
+    if has_expired:
+        EscalationEngine.expire_active_exceptions()
+    if has_deadline_passed:
+        EscalationEngine.escalate_expired_approvals()
 
 
 class ExceptionRequestViewSet(viewsets.ModelViewSet):
@@ -34,6 +61,16 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
         )
 
         if self.action == "retrieve":
+            qs = qs.select_related(
+                "business_unit__cio", "exception_type", "risk_issue",
+                "asset_type", "asset_purpose", "data_classification", "internet_exposure",
+                "requested_by", "assigned_approver", "risk_owner",
+                # parent snapshot FK traversals
+                "parent_exception__exception_type", "parent_exception__risk_issue",
+                "parent_exception__asset_type", "parent_exception__asset_purpose",
+                "parent_exception__data_classification", "parent_exception__internet_exposure",
+                "parent_exception__assigned_approver", "parent_exception__risk_owner",
+            )
             # audit_logs need performed_by for end_date_change_history and rejection_feedback
             audit_prefetch = Prefetch(
                 "audit_logs",
@@ -44,9 +81,21 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
                 "checkpoints__completed_by",
                 "reminder_logs",
                 "data_components",
+                "parent_exception__data_components",
+                "parent_exception__checkpoints",
             )
 
         return qs
+
+    def list(self, request, *args, **kwargs):
+        qs, _ = get_visible_exceptions(request.user)
+        _apply_time_based_transitions(qs)
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        _apply_time_based_transitions(ExceptionRequest.objects.filter(pk=instance.pk))
+        return super().retrieve(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         serializer.save(requested_by=self.request.user)
@@ -156,6 +205,130 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             return Response({"message": "Exception closed."})
         except ValueError as e:
             raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
+    def modify(self, request, pk=None):
+        """Rejected → Modified + create new fully-editable Draft (modification)."""
+        old = self.get_object()
+        if old.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can request a modification.")
+        try:
+            with transaction.atomic():
+                new_exc = self._copy_exception(old)
+                WorkflowService.mark_modified(
+                    old, request.user,
+                    related_version=new_exc.version,
+                    new_exception_id=new_exc.id,
+                )
+            return Response({
+                "message": "Modification created. Edit and submit the new draft.",
+                "new_exception_id": new_exc.id,
+            })
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
+    def extend(self, request, pk=None):
+        """Approved | Expired → Extended + create new fully-editable Draft (extension).
+        Available from 50% of the approved period through 2 weeks after end date."""
+        old = self.get_object()
+        if old.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can request an extension.")
+
+        if old.status not in {"Approved", "Expired"}:
+            raise ValidationError({"detail": "Extension is only available for Approved or Expired exceptions."})
+
+        now = timezone.now()
+        approved_at = old.approved_at
+        end_date = old.exception_end_date
+
+        if approved_at and end_date:
+            midpoint = approved_at + (end_date - approved_at) / 2
+            grace_deadline = end_date + timedelta(days=14)
+            if now < midpoint:
+                raise ValidationError({
+                    "detail": f"Extension is not yet available. It opens at the halfway point of the approved period ({midpoint.strftime('%d/%m/%Y %H:%M')} UTC)."
+                })
+            if now > grace_deadline:
+                raise ValidationError({
+                    "detail": "Extension window has closed. Extensions must be requested within 14 days of the end date."
+                })
+
+        try:
+            with transaction.atomic():
+                new_exc = self._copy_exception(old)
+                WorkflowService.mark_extended(
+                    old, request.user,
+                    related_version=new_exc.version,
+                    new_exception_id=new_exc.id,
+                )
+            return Response({
+                "message": "Extension created. Edit and submit the new draft.",
+                "new_exception_id": new_exc.id,
+            })
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
+    def remediate(self, request, pk=None):
+        """Expired → Closed. Requestor documents remediation and closes the exception."""
+        exception = self.get_object()
+        if exception.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can remediate an exception.")
+        notes = (request.data.get("notes") or "").strip()
+        if not notes:
+            raise ValidationError({"notes": "Remediation notes are required."})
+        try:
+            WorkflowService.remediate(exception, request.user, notes)
+            return Response({"message": "Exception remediated and closed."})
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
+    def close_rejected(self, request, pk=None):
+        """Rejected → Closed by requestor. Permanently closes without further action."""
+        exception = self.get_object()
+        if exception.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can close a rejected exception.")
+        try:
+            WorkflowService.close_rejected(exception, request.user)
+            return Response({"message": "Exception permanently closed."})
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete a Draft exception. Only the requestor or Security can delete drafts."""
+        instance = self.get_object()
+        if instance.status != "Draft":
+            raise ValidationError({"detail": "Only Draft exceptions can be deleted."})
+        if instance.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can delete this draft.")
+        instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _copy_exception(old):
+        """Create a new Draft copying all fields from old and set parent_exception."""
+        new_exc = ExceptionRequest.objects.create(
+            business_unit=old.business_unit,
+            exception_type=old.exception_type,
+            risk_issue=old.risk_issue,
+            asset_type=old.asset_type,
+            asset_purpose=old.asset_purpose,
+            data_classification=old.data_classification,
+            internet_exposure=old.internet_exposure,
+            number_of_assets=old.number_of_assets,
+            short_description=old.short_description,
+            reason_for_exception=old.reason_for_exception,
+            compensatory_controls=old.compensatory_controls,
+            requested_by=old.requested_by,
+            assigned_approver=old.assigned_approver,
+            risk_owner=old.risk_owner,
+            exception_end_date=old.exception_end_date,
+            parent_exception=old,
+        )
+        new_exc.data_components.set(old.data_components.all())
+        return new_exc
 
     @action(detail=True, methods=["post"])
     def update_end_date(self, request, pk=None):

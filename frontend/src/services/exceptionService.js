@@ -23,5 +23,6 @@ export const exceptionService = {
       exception_end_date: isoEndDate,
       notes: notes,
     }),
-  createException: (payload) => api.post('/api/exceptions/', payload)
+  createException: (payload) => api.post('/api/exceptions/', payload),
+  updateException: (id, payload) => api.patch(`/api/exceptions/${id}/`, payload),
 }
