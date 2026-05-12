@@ -22,7 +22,7 @@ environ.Env.read_env(os.path.join(BASE_DIR, '.env'), overwrite=True)
 SECRET_KEY = env('SECRET_KEY')
 DEBUG = env('DEBUG')
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', 'localhost:5173', '127.0.0.1:5173']
 
 # Application definition
 INSTALLED_APPS = [
@@ -34,8 +34,20 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
-    'exceptions'
+    'channels',
+    'exceptions',
 ]
+
+ASGI_APPLICATION = 'grc_backend.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            'hosts': [env('REDIS_URL', default='redis://localhost:6379/1')],
+        },
+    },
+}
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Added for Frontend connection

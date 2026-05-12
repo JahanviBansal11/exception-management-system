@@ -10,3 +10,4 @@ staticfiles/
 venv/
 env/
 .vscode/
+celerybeat-schedule.*

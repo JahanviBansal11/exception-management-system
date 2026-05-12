@@ -1,4 +1,5 @@
 from .exception_serializers import ExceptionRequestSerializer, CheckpointSerializer, ExceptionRequestListSerializer
+from .notification_serializers import NotificationSerializer
 from .reference_serializers import (
     BusinessUnitSerializer, ExceptionTypeSerializer, RiskIssueSerializer,
     AssetTypeSerializer, AssetPurposeSerializer, DataClassificationSerializer,
@@ -18,4 +19,5 @@ __all__ = [
     "DataComponentSerializer",
     "InternetExposureSerializer",
     "UserBriefSerializer",
+    "NotificationSerializer",
 ]

@@ -37,6 +37,68 @@ def _render(template_str: str, context: dict) -> str:
 
 class NotificationService:
 
+    # ── Central notification entry point ────────────────────────────────
+
+    @staticmethod
+    def notify(
+        recipients,
+        exception,
+        notification_type,
+        title,
+        message,
+        severity='info',
+        metadata=None,
+    ):
+        """
+        Create Notification DB records and push real-time WebSocket events.
+        Called from WorkflowService (action-triggered) and EscalationEngine (time-based).
+        Email delivery is handled separately by the send_* methods below.
+        """
+        from exceptions.models import Notification
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        channel_layer = get_channel_layer()
+        action_url = f'/dashboard/requestor?exception={exception.id}' if exception else ''
+
+        for recipient in recipients:
+            if not recipient:
+                continue
+            try:
+                notif = Notification.objects.create(
+                    recipient=recipient,
+                    exception_request=exception,
+                    notification_type=notification_type,
+                    severity=severity,
+                    title=title,
+                    message=message,
+                    action_url=action_url,
+                    metadata=metadata or {},
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist Notification for user %s: %s", recipient.id, exc)
+                continue
+            if channel_layer:
+                try:
+                    async_to_sync(channel_layer.group_send)(
+                        f'notifications_user_{recipient.id}',
+                        {
+                            'type': 'notification_push',
+                            'data': {
+                                'id': notif.id,
+                                'notification_type': notif.notification_type,
+                                'severity': notif.severity,
+                                'title': notif.title,
+                                'message': notif.message,
+                                'action_url': notif.action_url,
+                                'exception_id': exception.id if exception else None,
+                                'created_at': notif.created_at.isoformat(),
+                            },
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("WS push failed for user %s: %s", recipient.id, exc)
+
     # ── Workflow event notifications ─────────────────────────────────────
 
     @staticmethod
@@ -235,7 +297,27 @@ class NotificationService:
                 delivery_status="sent",
                 message_content=f"{marker}\n{html}"[:1000],
             )
-            logger.info("Active expiry reminder (%s) → %s (exception #%s)", reminder_stage, requester.email, exception_request.id)
+
+            stage_percent = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
+            percent = int(progress * 100)
+            severity = "danger" if stage_percent.get(reminder_stage, 0) >= 90 else "warning"
+            end_str = (
+                exception_request.exception_end_date.strftime("%b %d, %Y")
+                if exception_request.exception_end_date else "N/A"
+            )
+            NotificationService.notify(
+                recipients=[requester],
+                exception=exception_request,
+                notification_type='expiry_reminder',
+                severity=severity,
+                title=f'Exception expiring soon — {percent}% of active window elapsed',
+                message=(
+                    f'Exception #{exception_request.id} has used {percent}% of its active window. '
+                    f'End date: {end_str}.'
+                ),
+            )
+
+            logger.info("Active expiry reminder (%s) -> %s (exception #%s)", reminder_stage, requester.email, exception_request.id)
             return True
         except Exception as exc:
             logger.error("Failed active expiry reminder for #%s: %s", exception_request.id, exc)
@@ -253,15 +335,84 @@ class NotificationService:
 
     @staticmethod
     def send_approval_reminder(exception_request, reminder_type: str) -> bool:
-        """
-        Approval window reminder (50/75/90%) — not yet implemented.
-        Stubbed so ReminderEngine does not crash. Implement in a feature branch.
-        """
-        logger.warning(
-            "send_approval_reminder called for exception #%s (%s) — not yet implemented.",
-            exception_request.id, reminder_type,
-        )
-        return False
+        """Approval window reminder (50/75/90%) for the current pending actor."""
+        try:
+            if exception_request.status == "AwaitingRiskOwner":
+                recipient = exception_request.risk_owner
+                role = "risk-owner"
+            else:
+                recipient = exception_request.assigned_approver
+                role = "approver"
+
+            if not recipient or not recipient.email:
+                logger.warning("No recipient email for approval reminder on #%s", exception_request.id)
+                return False
+
+            percent_map = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
+            type_map = {
+                "Reminder_50": "approval_reminder_50",
+                "Reminder_75": "approval_reminder_75",
+                "Reminder_90": "approval_reminder_90",
+            }
+            percent = percent_map.get(reminder_type, 0)
+            notif_type = type_map.get(reminder_type, "approval_reminder_50")
+            severity = "danger" if percent >= 90 else "warning"
+
+            html = _render(_TEMPLATE_APPROVAL_REMINDER, {
+                "exception": exception_request,
+                "recipient": recipient,
+                "percent": percent,
+                "approval_deadline": exception_request.approval_deadline,
+                "review_link": _portal_link(role, exception_request.id),
+            })
+            _send(
+                f"[REMINDER] Exception Approval {percent}% Window Elapsed: "
+                f"{exception_request.short_description[:50]}",
+                html, [recipient.email],
+            )
+
+            from exceptions.models import ReminderLog
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=recipient,
+                channel="email",
+                reminder_type=reminder_type,
+                delivery_status="sent",
+            )
+
+            deadline_str = (
+                exception_request.approval_deadline.strftime("%b %d, %Y")
+                if exception_request.approval_deadline else "N/A"
+            )
+            NotificationService.notify(
+                recipients=[r for r in [recipient, exception_request.requested_by] if r],
+                exception=exception_request,
+                notification_type=notif_type,
+                severity=severity,
+                title=f'Approval reminder — {percent}% of window elapsed',
+                message=(
+                    f'Exception #{exception_request.id} approval window is {percent}% elapsed. '
+                    f'Deadline: {deadline_str}.'
+                ),
+            )
+
+            logger.info(
+                "Approval reminder (%s) -> %s (exception #%s)",
+                reminder_type, recipient.email, exception_request.id,
+            )
+            return True
+        except Exception as exc:
+            logger.error("Failed approval reminder for #%s: %s", exception_request.id, exc)
+            from exceptions.models import ReminderLog
+            ReminderLog.objects.create(
+                exception_request=exception_request,
+                sent_to=None,
+                channel="email",
+                reminder_type=reminder_type,
+                delivery_status="failed",
+                error_message=str(exc),
+            )
+            return False
 
 
 # ── Email Templates ──────────────────────────────────────────────────────────
@@ -345,4 +496,18 @@ _TEMPLATE_ACTIVE_EXPIRY = """
 </div>
 <p>Please plan remediation or extension actions before expiry.</p>
 <p><a href="{{ review_link }}" style="padding:10px 20px;background:#f97316;color:#fff;text-decoration:none;border-radius:4px;">Open Exception</a></p>
+"""
+
+_TEMPLATE_APPROVAL_REMINDER = """
+<h2>Approval Reminder — {{ percent }}% of Window Elapsed</h2>
+<p>Hello {{ recipient.first_name }},</p>
+<p>An exception requires your decision. {{ percent }}% of the approval window has elapsed.</p>
+<div style="border:1px solid #ddd;padding:15px;margin:20px 0;background:#fffbeb;">
+  <p><strong>Exception ID:</strong> #{{ exception.id }}</p>
+  <p><strong>Description:</strong> {{ exception.short_description }}</p>
+  <p><strong>Requested By:</strong> {{ exception.requested_by.get_full_name }}</p>
+  <p><strong>Business Unit:</strong> {{ exception.business_unit.name }}</p>
+  <p><strong>Deadline:</strong> {{ approval_deadline|date:"M d, Y H:i" }}</p>
+</div>
+<p><a href="{{ review_link }}" style="padding:10px 20px;background:#f59e0b;color:#fff;text-decoration:none;border-radius:4px;">Review Exception</a></p>
 """

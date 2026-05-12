@@ -56,9 +56,10 @@ class WorkflowService:
 
             elif new_status == "Approved":
                 exception_request.approved_at = timezone.now()
+                exception_request.reminder_stage = "None"
 
             exception_request.save(
-                update_fields=["status", "updated_at", "approval_deadline", "approved_at"]
+                update_fields=["status", "updated_at", "approval_deadline", "approved_at", "reminder_stage"]
             )
 
             AuditLog.objects.create(
@@ -125,6 +126,16 @@ class WorkflowService:
 
         from exceptions.services.notification_service import NotificationService
         NotificationService.send_submission_notification(exception_request)
+        approver = exception_request.assigned_approver
+        if approver:
+            NotificationService.notify(
+                recipients=[approver],
+                exception=exception_request,
+                notification_type='exception_submitted',
+                severity='info',
+                title='New exception submitted',
+                message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" requires your review.',
+            )
 
     @staticmethod
     def bu_approve(exception_request, user, notes=""):
@@ -174,6 +185,16 @@ class WorkflowService:
                     notes=f"Awaiting risk owner. BU CIO notes: {approval_notes}",
                 )
             NotificationService.send_risk_owner_notification(exception_request)
+            risk_owner = exception_request.risk_owner
+            if risk_owner:
+                NotificationService.notify(
+                    recipients=[risk_owner],
+                    exception=exception_request,
+                    notification_type='exception_submitted',
+                    severity='warning',
+                    title='Risk assessment required',
+                    message=f'Exception #{exception_request.id} has been approved by BU CIO and requires your risk assessment.',
+                )
             return
 
         # Low / Medium — auto-approve
@@ -214,6 +235,14 @@ class WorkflowService:
                       else "Approved by BU CIO (Low/Medium risk)",
             )
         NotificationService.send_exception_approved_notification(exception_request, approved_by_user=user)
+        NotificationService.notify(
+            recipients=[exception_request.requested_by],
+            exception=exception_request,
+            notification_type='exception_approved',
+            severity='success',
+            title='Exception approved',
+            message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" has been approved.',
+        )
 
     @staticmethod
     def bu_reject(exception_request, user, notes):
@@ -250,6 +279,14 @@ class WorkflowService:
 
         from exceptions.services.notification_service import NotificationService
         NotificationService.send_exception_rejected_notification(exception_request, feedback)
+        NotificationService.notify(
+            recipients=[exception_request.requested_by],
+            exception=exception_request,
+            notification_type='exception_rejected',
+            severity='danger',
+            title='Exception rejected',
+            message=f'Exception #{exception_request.id} was rejected. Feedback: {feedback}',
+        )
 
     @staticmethod
     def risk_approve(exception_request, user, notes=""):
@@ -277,6 +314,14 @@ class WorkflowService:
 
         from exceptions.services.notification_service import NotificationService
         NotificationService.send_exception_approved_notification(exception_request, approved_by_user=user)
+        NotificationService.notify(
+            recipients=[exception_request.requested_by],
+            exception=exception_request,
+            notification_type='exception_approved',
+            severity='success',
+            title='Exception approved',
+            message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" has been approved.',
+        )
 
     @staticmethod
     def risk_reject(exception_request, user, notes):
@@ -308,6 +353,14 @@ class WorkflowService:
 
         from exceptions.services.notification_service import NotificationService
         NotificationService.send_exception_rejected_notification(exception_request, feedback)
+        NotificationService.notify(
+            recipients=[exception_request.requested_by],
+            exception=exception_request,
+            notification_type='exception_rejected',
+            severity='danger',
+            title='Exception rejected',
+            message=f'Exception #{exception_request.id} was rejected by risk owner. Feedback: {feedback}',
+        )
 
     @staticmethod
     def mark_expired(exception_request, user):
@@ -320,6 +373,17 @@ class WorkflowService:
             details={"message": "Approval deadline passed without a decision."},
         )
 
+        from exceptions.services.notification_service import NotificationService
+        recipients = [r for r in [exception_request.assigned_approver, exception_request.requested_by] if r]
+        NotificationService.notify(
+            recipients=recipients,
+            exception=exception_request,
+            notification_type='approval_deadline_passed',
+            severity='danger',
+            title='Approval deadline passed',
+            message=f'Exception #{exception_request.id} approval deadline has passed without a decision.',
+        )
+
     @staticmethod
     def close(exception_request, user):
         """Approved → Closed."""
@@ -327,6 +391,16 @@ class WorkflowService:
             raise ValueError("Only Approved exceptions can be closed.")
 
         WorkflowService.change_status(exception_request, "Closed", user, "CLOSE")
+
+        from exceptions.services.notification_service import NotificationService
+        NotificationService.notify(
+            recipients=[exception_request.requested_by],
+            exception=exception_request,
+            notification_type='exception_closed',
+            severity='info',
+            title='Exception closed',
+            message=f'Exception #{exception_request.id} has been closed.',
+        )
 
     @staticmethod
     def close_rejected(exception_request, user):

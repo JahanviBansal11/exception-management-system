@@ -10,6 +10,7 @@ from .reference import (
 )
 from .exception_request import ExceptionRequest
 from .audit import AuditLog, ExceptionCheckpoint, ReminderLog
+from .notification import Notification
 
 __all__ = [
     "BusinessUnit",
@@ -24,4 +25,5 @@ __all__ = [
     "AuditLog",
     "ExceptionCheckpoint",
     "ReminderLog",
+    "Notification",
 ]

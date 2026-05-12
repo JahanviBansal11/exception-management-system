@@ -9,6 +9,10 @@ from .views import (
     SecurityUserDetailView,
     SecurityAuditTrailView,
     SecurityAuditListView,
+    NotificationListView,
+    NotificationUnreadCountView,
+    NotificationMarkReadView,
+    NotificationMarkAllReadView,
 )
 
 router = DefaultRouter()
@@ -22,4 +26,8 @@ urlpatterns = router.urls + [
     path('security/users/<int:user_id>/', SecurityUserDetailView.as_view(), name='security_user_detail'),
     path('security/audit-list/', SecurityAuditListView.as_view(), name='security_audit_list'),
     path('security/audit-trail/', SecurityAuditTrailView.as_view(), name='security_audit_trail'),
+    path('notifications/', NotificationListView.as_view(), name='notifications_list'),
+    path('notifications/unread-count/', NotificationUnreadCountView.as_view(), name='notifications_unread_count'),
+    path('notifications/mark-all-read/', NotificationMarkAllReadView.as_view(), name='notifications_mark_all_read'),
+    path('notifications/<int:pk>/read/', NotificationMarkReadView.as_view(), name='notification_mark_read'),
 ]

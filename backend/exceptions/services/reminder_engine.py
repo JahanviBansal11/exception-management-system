@@ -91,6 +91,9 @@ class ReminderEngine:
                     exception, stage, progress
                 )
                 if success:
+                    exception.reminder_stage = stage
+                    exception.last_reminder_sent = now
+                    exception.save(update_fields=["reminder_stage", "last_reminder_sent", "updated_at"])
                     sent += 1
             except Exception as exc:
                 logger.error("Error evaluating active exception #%s: %s", exception.id, exc)
@@ -112,20 +115,9 @@ class ReminderEngine:
 
     @staticmethod
     def _next_active_stage(exception, progress: float):
-        """Return the active expiry stage to remind about, or None if already sent."""
-        from exceptions.models import ReminderLog
-        for reminder_type, threshold in _THRESHOLDS:
-            if progress >= threshold:
-                marker = f"ACTIVE_EXPIRY:{reminder_type}"
-                already = ReminderLog.objects.filter(
-                    exception_request=exception,
-                    reminder_type="Expired_Notice",
-                    delivery_status="sent",
-                    message_content__contains=marker,
-                ).exists()
-                if not already:
-                    return reminder_type
-        return None
+        """Return the active expiry stage to remind about, or None if already sent.
+        Uses exception.reminder_stage (same field as approval reminders, reset on Approved transition)."""
+        return ReminderEngine._next_reminder(progress, exception.reminder_stage)
 
 
 def _stage_index(stage: str) -> int:

@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { api } from '../../services/apiClient'
 import { useAuth } from '../../useAuth.js'
 import { matchesView, sortExceptions, matchesKpi } from '../../hooks/useExceptions.js'
+import { useNotifications } from '../../hooks/useNotifications.js'
 
 const DASHBOARD_TITLES = {
   requestor: 'Requestor Dashboard',
@@ -211,11 +212,11 @@ function DashboardPage({ view }) {
   const [auditLogsError, setAuditLogsError] = useState('')
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
-  const [loadingNotifications, setLoadingNotifications] = useState(false)
+  const [loadingNotifications] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [actionError, setActionError] = useState('')
   const [summary, setSummary] = useState(null)
-  const [notifications, setNotifications] = useState([])
+  const { notifications, unreadCount, markRead, markAllRead, refresh: loadNotifications } = useNotifications(user)
   const [requesterPopup, setRequesterPopup] = useState(null)
   const [sortKey, setSortKey] = useState('newest')
   const [selectedStatusFilters, setSelectedStatusFilters] = useState([])
@@ -327,28 +328,6 @@ function DashboardPage({ view }) {
     setSummary(response.data)
   }, [])
 
-  const loadNotifications = useCallback(async () => {
-    setLoadingNotifications(true)
-    try {
-      const response = await api.get('/api/worklist/notifications/')
-      const items = response.data.items || []
-      setNotifications(items)
-
-      if (view === 'requestor') {
-        const updateItems = items.filter((item) => String(item.event_type || '').startsWith('request_'))
-        if (updateItems.length > 0) {
-          const latest = updateItems[0]
-          const lastSeenTs = window.localStorage.getItem(`requester-popup-last-seen-${user?.id || 'anon'}`)
-          const latestTs = latest.timestamp || ''
-          if (!lastSeenTs || (latestTs && latestTs > lastSeenTs)) {
-            setRequesterPopup(latest)
-          }
-        }
-      }
-    } finally {
-      setLoadingNotifications(false)
-    }
-  }, [view, user?.id])
 
   const loadAdminUsers = useCallback(async () => {
     if (view !== 'security') return
@@ -696,7 +675,7 @@ function DashboardPage({ view }) {
 
   const title = DASHBOARD_TITLES[view] || 'Exception Management Dashboard'
   const canCreateException = view === 'requestor' || view === 'security'
-  const notificationBadgeCount = notifications.length
+  const notificationBadgeCount = unreadCount
   const canUpdateEndDate = ['approver', 'risk-owner', 'security'].includes(view)
 
   return (
@@ -1383,6 +1362,11 @@ function DashboardPage({ view }) {
             <div className="panel-header">
               <h3>Notifications</h3>
               <div style={{ display: 'flex', gap: '8px' }}>
+                {unreadCount > 0 && (
+                  <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={markAllRead}>
+                    Mark all read
+                  </button>
+                )}
                 <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={loadNotifications}>
                   Refresh
                 </button>
@@ -1396,15 +1380,14 @@ function DashboardPage({ view }) {
             {!loadingNotifications && notifications.length === 0 ? <div className="meta">No notifications right now.</div> : null}
 
             <div className="notification-list notification-list-scroll">
-              {notifications.map((item, index) => (
+              {notifications.map((item) => (
                 <button
-                  key={`${item.event_type}-${item.exception_id || 'na'}-${item.timestamp || index}`}
+                  key={item.id}
                   type="button"
-                  className="notification-item"
+                  className={`notification-item${!item.is_read ? ' unread' : ''}`}
                   onClick={() => {
-                    if (item.exception_id) {
-                      setSelectedId(item.exception_id)
-                    }
+                    if (!item.is_read) markRead(item.id)
+                    if (item.exception_id) setSelectedId(item.exception_id)
                     setNotificationsOpen(false)
                   }}
                 >
@@ -1415,7 +1398,7 @@ function DashboardPage({ view }) {
                     </span>
                   </div>
                   <div>{item.message}</div>
-                  <div className="meta">{formatDateTime(item.timestamp)}</div>
+                  <div className="meta">{formatDateTime(item.created_at)}</div>
                 </button>
               ))}
             </div>

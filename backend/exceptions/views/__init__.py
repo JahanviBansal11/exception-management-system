@@ -5,6 +5,10 @@ from .security_views import (
     SecurityUsersView, SecurityUserDetailView,
     SecurityAuditTrailView, SecurityAuditListView,
 )
+from .notification_views import (
+    NotificationListView, NotificationUnreadCountView,
+    NotificationMarkReadView, NotificationMarkAllReadView,
+)
 
 __all__ = [
     "ExceptionRequestViewSet",
@@ -15,4 +19,8 @@ __all__ = [
     "SecurityUserDetailView",
     "SecurityAuditTrailView",
     "SecurityAuditListView",
+    "NotificationListView",
+    "NotificationUnreadCountView",
+    "NotificationMarkReadView",
+    "NotificationMarkAllReadView",
 ]
