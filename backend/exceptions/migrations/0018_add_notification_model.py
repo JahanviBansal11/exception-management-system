@@ -8,7 +8,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ("exceptions", "0015_alter_auditlog_action_type_and_more"),
+        ("exceptions", "0017_add_overdue_expired_notice"),
     ]
 
     operations = [
