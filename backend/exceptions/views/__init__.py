@@ -8,6 +8,7 @@ from .security_views import (
 from .notification_views import (
     NotificationListView, NotificationUnreadCountView,
     NotificationMarkReadView, NotificationMarkAllReadView,
+    WsTicketView,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "NotificationUnreadCountView",
     "NotificationMarkReadView",
     "NotificationMarkAllReadView",
+    "WsTicketView",
 ]

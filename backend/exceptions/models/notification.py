@@ -30,7 +30,7 @@ class Notification(models.Model):
     ]
 
     recipient         = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
-    exception_request = models.ForeignKey(ExceptionRequest, on_delete=models.CASCADE,
+    exception_request = models.ForeignKey(ExceptionRequest, on_delete=models.SET_NULL,
                                           null=True, blank=True, related_name='notifications')
     notification_type = models.CharField(max_length=60, choices=TYPE_CHOICES)
     severity          = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='info')
@@ -39,7 +39,10 @@ class Notification(models.Model):
     action_url        = models.CharField(max_length=500, blank=True)
     is_read           = models.BooleanField(default=False)
     read_at           = models.DateTimeField(null=True, blank=True)
-    email_sent        = models.BooleanField(default=False)
+    # True when an email was dispatched to the Celery queue alongside this
+    # in-app notification.  Does NOT confirm delivery — the async task may
+    # still fail.  False = in-app only (e.g. close/expire system events).
+    email_queued      = models.BooleanField(default=False)
     created_at        = models.DateTimeField(auto_now_add=True)
     metadata          = models.JSONField(default=dict, blank=True)
 

@@ -81,6 +81,33 @@ def notify_unresolved_expired_exceptions(self):
         raise self.retry(exc=exc, countdown=300)
 
 
+# ── Maintenance Tasks ───────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=3)
+def purge_old_notifications(self):
+    """
+    Daily: delete read notifications older than 90 days.
+
+    Unread notifications are never purged — a user who hasn't logged in for
+    months should still see their pending alerts when they return.
+    """
+    try:
+        from datetime import timedelta
+        from django.utils import timezone
+        from exceptions.models import Notification
+
+        cutoff = timezone.now() - timedelta(days=90)
+        deleted_count, _ = Notification.objects.filter(
+            is_read=True,
+            created_at__lt=cutoff,
+        ).delete()
+        logger.info("purge_old_notifications: deleted %s notifications.", deleted_count)
+        return {"status": "success", "deleted_count": deleted_count}
+    except Exception as exc:
+        logger.error("purge_old_notifications failed: %s", exc)
+        raise self.retry(exc=exc, countdown=300)
+
+
 # ── Email Delivery Task ──────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=5)

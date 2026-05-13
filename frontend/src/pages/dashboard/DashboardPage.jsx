@@ -248,12 +248,10 @@ function DashboardPage({ view }) {
   const [auditLogsError, setAuditLogsError] = useState('')
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
-  const [loadingNotifications] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [actionError, setActionError] = useState('')
   const [summary, setSummary] = useState(null)
   const { notifications, unreadCount, markRead, markAllRead, refresh: loadNotifications } = useNotifications(user)
-  const [requesterPopup, setRequesterPopup] = useState(null)
   const [sortKey, setSortKey] = useState('newest')
   const [selectedStatusFilters, setSelectedStatusFilters] = useState([])
   const [selectedRiskFilters, setSelectedRiskFilters] = useState([])
@@ -932,47 +930,6 @@ function DashboardPage({ view }) {
           {successMessage}
         </div>
       )}
-
-      {view === 'requestor' && requesterPopup ? (
-        <div className="requester-popup">
-          <div className="requester-popup-title">Update on your request</div>
-          <div><strong>{requesterPopup.title}</strong></div>
-          <div style={{ marginTop: '4px' }}>{requesterPopup.message}</div>
-          {requesterPopup.feedback ? <div style={{ marginTop: '4px' }}><strong>Feedback:</strong> {requesterPopup.feedback}</div> : null}
-          <div className="meta" style={{ marginTop: '6px' }}>{formatDateTime(requesterPopup.timestamp)}</div>
-          <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-            <button
-              className="btn btn-secondary"
-              style={{ width: 'auto' }}
-              onClick={() => {
-                if (requesterPopup.exception_id) {
-                  setSelectedId(requesterPopup.exception_id)
-                }
-                const ts = requesterPopup.timestamp || ''
-                if (ts) {
-                  window.localStorage.setItem(`requester-popup-last-seen-${user?.id || 'anon'}`, ts)
-                }
-                setRequesterPopup(null)
-              }}
-            >
-              View Details
-            </button>
-            <button
-              className="btn"
-              style={{ width: 'auto' }}
-              onClick={() => {
-                const ts = requesterPopup.timestamp || ''
-                if (ts) {
-                  window.localStorage.setItem(`requester-popup-last-seen-${user?.id || 'anon'}`, ts)
-                }
-                setRequesterPopup(null)
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      ) : null}
 
       {summary ? (
         <div className="summary-grid">
@@ -1806,30 +1763,46 @@ function DashboardPage({ view }) {
               </div>
             </div>
 
-            {loadingNotifications ? <div className="meta">Loading notifications...</div> : null}
-            {!loadingNotifications && notifications.length === 0 ? <div className="meta">No notifications right now.</div> : null}
+            {notifications.length === 0 ? <div className="meta">No notifications right now.</div> : null}
 
             <div className="notification-list notification-list-scroll">
               {notifications.map((item) => (
-                <button
+                <div
                   key={item.id}
-                  type="button"
                   className={`notification-item${!item.is_read ? ' unread' : ''}`}
-                  onClick={() => {
-                    if (!item.is_read) markRead(item.id)
-                    if (item.exception_id) setSelectedId(item.exception_id)
-                    setNotificationsOpen(false)
-                  }}
                 >
-                  <div className="list-card-top">
-                    <strong>{item.title}</strong>
-                    <span className={`badge badge-${item.severity === 'danger' ? 'danger' : item.severity === 'warning' ? 'warning' : 'info'}`}>
-                      {item.severity}
-                    </span>
-                  </div>
-                  <div>{item.message}</div>
-                  <div className="meta">{formatDateTime(item.created_at)}</div>
-                </button>
+                  <button
+                    type="button"
+                    className="notification-item-body"
+                    onClick={() => {
+                      if (!item.is_read) markRead(item.id)
+                      if (item.exception_id) setSelectedId(item.exception_id)
+                      setNotificationsOpen(false)
+                    }}
+                  >
+                    <div className="list-card-top">
+                      <strong>{item.title}</strong>
+                      <span className={`badge badge-${item.severity === 'danger' ? 'danger' : item.severity === 'warning' ? 'warning' : 'info'}`}>
+                        {item.severity}
+                      </span>
+                    </div>
+                    <div>{item.message}</div>
+                    <div className="meta">{formatDateTime(item.created_at)}</div>
+                  </button>
+                  {!item.is_read && (
+                    <button
+                      type="button"
+                      className="notification-dismiss-btn"
+                      title="Dismiss"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        markRead(item.id)
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </div>

@@ -135,6 +135,7 @@ class WorkflowService:
                 severity='info',
                 title='New exception submitted',
                 message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" requires your review.',
+                email_queued=True,
             )
 
     @staticmethod
@@ -194,6 +195,7 @@ class WorkflowService:
                     severity='warning',
                     title='Risk assessment required',
                     message=f'Exception #{exception_request.id} has been approved by BU CIO and requires your risk assessment.',
+                    email_queued=True,
                 )
             return
 
@@ -242,6 +244,7 @@ class WorkflowService:
             severity='success',
             title='Exception approved',
             message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" has been approved.',
+            email_queued=True,
         )
 
     @staticmethod
@@ -286,6 +289,7 @@ class WorkflowService:
             severity='danger',
             title='Exception rejected',
             message=f'Exception #{exception_request.id} was rejected. Feedback: {feedback}',
+            email_queued=True,
         )
 
     @staticmethod
@@ -321,6 +325,7 @@ class WorkflowService:
             severity='success',
             title='Exception approved',
             message=f'Exception #{exception_request.id} "{exception_request.short_description[:60]}" has been approved.',
+            email_queued=True,
         )
 
     @staticmethod
@@ -360,12 +365,14 @@ class WorkflowService:
             severity='danger',
             title='Exception rejected',
             message=f'Exception #{exception_request.id} was rejected by risk owner. Feedback: {feedback}',
+            email_queued=True,
         )
 
     @staticmethod
     def mark_expired(exception_request, user):
         """Submitted | AwaitingRiskOwner → ApprovalDeadlinePassed. Called by EscalationEngine."""
-        if exception_request.status not in {"Submitted", "AwaitingRiskOwner"}:
+        previous_status = exception_request.status
+        if previous_status not in {"Submitted", "AwaitingRiskOwner"}:
             raise ValueError("Only pending approvals can have their deadline passed.")
 
         WorkflowService.change_status(
@@ -374,7 +381,12 @@ class WorkflowService:
         )
 
         from exceptions.services.notification_service import NotificationService
-        recipients = [r for r in [exception_request.assigned_approver, exception_request.requested_by] if r]
+        pending_actor = (
+            exception_request.risk_owner
+            if previous_status == "AwaitingRiskOwner"
+            else exception_request.assigned_approver
+        )
+        recipients = [r for r in [pending_actor, exception_request.requested_by] if r]
         NotificationService.notify(
             recipients=recipients,
             exception=exception_request,

@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 from django.conf import settings
 from django.template import Context, Template
-from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ def _portal_link(role: str, exception_id: int) -> str:
 def _send(subject: str, html: str, recipients: list) -> None:
     """Dispatch email via Celery task."""
     from exceptions.tasks import send_email_task
-    send_email_task.delay(
+    send_email_task.delay(  # type: ignore[operator]
         subject=subject,
         message=html,
         from_email=settings.DEFAULT_FROM_EMAIL,
@@ -48,6 +47,7 @@ class NotificationService:
         message,
         severity='info',
         metadata=None,
+        email_queued=False,
     ):
         """
         Create Notification DB records and push real-time WebSocket events.
@@ -59,7 +59,20 @@ class NotificationService:
         from channels.layers import get_channel_layer
 
         channel_layer = get_channel_layer()
-        action_url = f'/dashboard/requestor?exception={exception.id}' if exception else ''
+
+        def _action_url_for(user, exc):
+            if not exc:
+                return ''
+            groups = set(user.groups.values_list('name', flat=True))
+            if 'Security' in groups:
+                role = 'security'
+            elif 'Approver' in groups:
+                role = 'approver'
+            elif 'RiskOwner' in groups:
+                role = 'risk-owner'
+            else:
+                role = 'requestor'
+            return f'/dashboard/{role}?exception={exc.id}'
 
         for recipient in recipients:
             if not recipient:
@@ -72,8 +85,9 @@ class NotificationService:
                     severity=severity,
                     title=title,
                     message=message,
-                    action_url=action_url,
+                    action_url=_action_url_for(recipient, exception),
                     metadata=metadata or {},
+                    email_queued=email_queued,
                 )
             except Exception as exc:
                 logger.warning("Failed to persist Notification for user %s: %s", recipient.id, exc)
@@ -240,73 +254,96 @@ class NotificationService:
             return False
 
     @staticmethod
-    def send_approval_expired_notification(exception_request) -> bool:
-        """Notify approver that the approval deadline has passed."""
+    def send_approval_expired_notification(exception_request, previous_status: str = "Submitted") -> bool:
+        """Notify the pending decision-maker that the approval deadline has passed.
+        Emails the risk owner if the exception was AwaitingRiskOwner, otherwise the approver."""
         try:
-            approver = exception_request.assigned_approver
+            recipient = (
+                exception_request.risk_owner
+                if previous_status == "AwaitingRiskOwner"
+                else exception_request.assigned_approver
+            )
             requester = exception_request.requested_by
-            if not approver or not approver.email:
-                logger.warning("No approver email for exception #%s", exception_request.id)
+            if not recipient or not recipient.email:
+                logger.warning("No recipient email for deadline-expired notification on #%s", exception_request.id)
                 return False
 
             html = _render(_TEMPLATE_EXPIRED, {
                 "exception": exception_request,
-                "approver": approver,
+                "approver": recipient,
                 "requester": requester,
             })
             _send(
                 f"[ESCALATED] Exception Approval Expired: {exception_request.short_description[:50]}",
-                html, [approver.email],
+                html, [recipient.email],
             )
-            logger.info("Expiry notification → %s (exception #%s)", approver.email, exception_request.id)
+            logger.info("Deadline-expired notification → %s (exception #%s)", recipient.email, exception_request.id)
             return True
         except Exception as exc:
-            logger.error("Failed expiry notification for #%s: %s", exception_request.id, exc)
+            logger.error("Failed deadline-expired notification for #%s: %s", exception_request.id, exc)
             return False
 
     @staticmethod
     def send_active_exception_expiry_reminder(exception_request, reminder_stage: str, progress: float) -> bool:
-        """Notify requester that an approved exception is approaching its end date."""
-        try:
-            requester = exception_request.requested_by
-            if not requester or not requester.email:
-                logger.warning("No requester email for expiry reminder on #%s", exception_request.id)
-                return False
+        """Notify requester AND risk owner that an approved exception is approaching its end date.
+        Each recipient receives exactly one email per stage per exception (ReminderLog-guarded)."""
+        from exceptions.models import ReminderLog
 
-            marker = f"ACTIVE_EXPIRY:{reminder_stage}"
+        stage_percent = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
+        percent = stage_percent.get(reminder_stage, int(progress * 100))
+        severity = "danger" if percent >= 90 else "warning"
+        subject = (
+            f"[REMINDER] Exception expiring — {percent}% of active window elapsed: "
+            f"{exception_request.short_description[:50]}"
+        )
+        end_str = (
+            exception_request.exception_end_date.strftime("%b %d, %Y")
+            if exception_request.exception_end_date else "N/A"
+        )
 
+        requester = exception_request.requested_by
+        risk_owner = exception_request.risk_owner
+
+        if not requester or not requester.email:
+            logger.warning("No requester email for expiry reminder on #%s", exception_request.id)
+            return False
+
+        def _email_recipient(user, role):
+            if not user or not user.email:
+                return
+            # Atomically claim the "sent" slot.  If another worker already
+            # created this row the get_or_create returns created=False and we
+            # skip.  The DB-level UniqueConstraint (reminderlog_unique_sent)
+            # is the final guard if two workers race past the SELECT together.
+            _log, claimed = ReminderLog.objects.get_or_create(
+                exception_request=exception_request,
+                sent_to=user,
+                reminder_type=reminder_stage,
+                delivery_status="sent",
+                defaults={"channel": "email", "message_content": f"ACTIVE_EXPIRY:{reminder_stage}"},
+            )
+            if not claimed:
+                logger.info(
+                    "Active expiry reminder %s already sent to user %s for #%s, skipping",
+                    reminder_stage, user.id, exception_request.id,
+                )
+                return
             html = _render(_TEMPLATE_ACTIVE_EXPIRY, {
                 "exception": exception_request,
-                "requester": requester,
+                "requester": user,
                 "reminder_stage": reminder_stage,
-                "progress_percent": int(progress * 100),
-                "review_link": _portal_link("requestor", exception_request.id),
+                "progress_percent": percent,
+                "review_link": _portal_link(role, exception_request.id),
             })
+            _send(subject, html, [user.email])
 
-            _send(
-                f"[REMINDER] Active Exception {reminder_stage}: {exception_request.short_description[:50]}",
-                html, [requester.email],
-            )
+        try:
+            _email_recipient(requester, "requestor")
+            if risk_owner and risk_owner != requester:
+                _email_recipient(risk_owner, "risk-owner")
 
-            from exceptions.models import ReminderLog
-            ReminderLog.objects.create(
-                exception_request=exception_request,
-                sent_to=requester,
-                channel="email",
-                reminder_type="Expired_Notice",
-                delivery_status="sent",
-                message_content=f"{marker}\n{html}"[:1000],
-            )
-
-            stage_percent = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
-            percent = int(progress * 100)
-            severity = "danger" if stage_percent.get(reminder_stage, 0) >= 90 else "warning"
-            end_str = (
-                exception_request.exception_end_date.strftime("%b %d, %Y")
-                if exception_request.exception_end_date else "N/A"
-            )
             NotificationService.notify(
-                recipients=[requester],
+                recipients=[r for r in [requester, risk_owner] if r],
                 exception=exception_request,
                 notification_type='expiry_reminder',
                 severity=severity,
@@ -315,21 +352,25 @@ class NotificationService:
                     f'Exception #{exception_request.id} has used {percent}% of its active window. '
                     f'End date: {end_str}.'
                 ),
+                email_queued=True,
             )
-
-            logger.info("Active expiry reminder (%s) -> %s (exception #%s)", reminder_stage, requester.email, exception_request.id)
+            logger.info(
+                "Active expiry reminder (%s) -> requester=%s, risk_owner=%s (exception #%s)",
+                reminder_stage,
+                requester.email,
+                risk_owner.email if risk_owner else None,
+                exception_request.id,
+            )
             return True
         except Exception as exc:
             logger.error("Failed active expiry reminder for #%s: %s", exception_request.id, exc)
-            from exceptions.models import ReminderLog
             ReminderLog.objects.create(
                 exception_request=exception_request,
-                sent_to=getattr(exception_request, "requested_by", None),
+                sent_to=requester,
                 channel="email",
-                reminder_type="Expired_Notice",
+                reminder_type=reminder_stage,
                 delivery_status="failed",
                 error_message=str(exc),
-                message_content=f"ACTIVE_EXPIRY:{reminder_stage}",
             )
             return False
 
@@ -346,7 +387,7 @@ class NotificationService:
             security_group = Group.objects.filter(name="Security").first()
             if security_group:
                 security_emails = list(
-                    security_group.user_set.filter(is_active=True)
+                    security_group.user_set.filter(is_active=True)  # type: ignore[attr-defined]
                     .exclude(email="")
                     .values_list("email", flat=True)
                 )
@@ -415,57 +456,73 @@ class NotificationService:
 
     @staticmethod
     def send_approval_reminder(exception_request, reminder_type: str) -> bool:
-        """Approval window reminder (50/75/90%) for the current pending actor."""
-        try:
-            if exception_request.status == "AwaitingRiskOwner":
-                recipient = exception_request.risk_owner
-                role = "risk-owner"
-            else:
-                recipient = exception_request.assigned_approver
-                role = "approver"
+        """Approval window reminder (50/75/90%) — emails pending actor AND requester, each exactly once.
+        ReminderLog pre-check prevents duplicates if Beat runs concurrently."""
+        from exceptions.models import ReminderLog
 
-            if not recipient or not recipient.email:
-                logger.warning("No recipient email for approval reminder on #%s", exception_request.id)
-                return False
+        if exception_request.status == "AwaitingRiskOwner":
+            pending_actor = exception_request.risk_owner
+            actor_role = "risk-owner"
+        else:
+            pending_actor = exception_request.assigned_approver
+            actor_role = "approver"
 
-            percent_map = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
-            type_map = {
-                "Reminder_50": "approval_reminder_50",
-                "Reminder_75": "approval_reminder_75",
-                "Reminder_90": "approval_reminder_90",
-            }
-            percent = percent_map.get(reminder_type, 0)
-            notif_type = type_map.get(reminder_type, "approval_reminder_50")
-            severity = "danger" if percent >= 90 else "warning"
+        requester = exception_request.requested_by
 
+        if not pending_actor or not pending_actor.email:
+            logger.warning("No pending actor email for approval reminder on #%s", exception_request.id)
+            return False
+
+        percent_map = {"Reminder_50": 50, "Reminder_75": 75, "Reminder_90": 90}
+        type_map = {
+            "Reminder_50": "approval_reminder_50",
+            "Reminder_75": "approval_reminder_75",
+            "Reminder_90": "approval_reminder_90",
+        }
+        percent = percent_map.get(reminder_type, 0)
+        notif_type = type_map.get(reminder_type, "approval_reminder_50")
+        severity = "danger" if percent >= 90 else "warning"
+        subject = (
+            f"[REMINDER] Exception Approval {percent}% Window Elapsed: "
+            f"{exception_request.short_description[:50]}"
+        )
+        deadline_str = (
+            exception_request.approval_deadline.strftime("%b %d, %Y")
+            if exception_request.approval_deadline else "N/A"
+        )
+
+        def _email_recipient(user, role):
+            if not user or not user.email:
+                return
+            _log, claimed = ReminderLog.objects.get_or_create(
+                exception_request=exception_request,
+                sent_to=user,
+                reminder_type=reminder_type,
+                delivery_status="sent",
+                defaults={"channel": "email"},
+            )
+            if not claimed:
+                logger.info(
+                    "Approval reminder %s already sent to user %s for #%s, skipping",
+                    reminder_type, user.id, exception_request.id,
+                )
+                return
             html = _render(_TEMPLATE_APPROVAL_REMINDER, {
                 "exception": exception_request,
-                "recipient": recipient,
+                "recipient": user,
                 "percent": percent,
                 "approval_deadline": exception_request.approval_deadline,
                 "review_link": _portal_link(role, exception_request.id),
             })
-            _send(
-                f"[REMINDER] Exception Approval {percent}% Window Elapsed: "
-                f"{exception_request.short_description[:50]}",
-                html, [recipient.email],
-            )
+            _send(subject, html, [user.email])
 
-            from exceptions.models import ReminderLog
-            ReminderLog.objects.create(
-                exception_request=exception_request,
-                sent_to=recipient,
-                channel="email",
-                reminder_type=reminder_type,
-                delivery_status="sent",
-            )
+        try:
+            _email_recipient(pending_actor, actor_role)
+            if requester and requester != pending_actor:
+                _email_recipient(requester, "requestor")
 
-            deadline_str = (
-                exception_request.approval_deadline.strftime("%b %d, %Y")
-                if exception_request.approval_deadline else "N/A"
-            )
             NotificationService.notify(
-                recipients=[r for r in [recipient, exception_request.requested_by] if r],
+                recipients=[r for r in [pending_actor, requester] if r],
                 exception=exception_request,
                 notification_type=notif_type,
                 severity=severity,
@@ -474,16 +531,18 @@ class NotificationService:
                     f'Exception #{exception_request.id} approval window is {percent}% elapsed. '
                     f'Deadline: {deadline_str}.'
                 ),
+                email_queued=True,
             )
-
             logger.info(
-                "Approval reminder (%s) -> %s (exception #%s)",
-                reminder_type, recipient.email, exception_request.id,
+                "Approval reminder (%s) -> actor=%s, requester=%s (exception #%s)",
+                reminder_type,
+                pending_actor.email,
+                requester.email if requester else None,
+                exception_request.id,
             )
             return True
         except Exception as exc:
             logger.error("Failed approval reminder for #%s: %s", exception_request.id, exc)
-            from exceptions.models import ReminderLog
             ReminderLog.objects.create(
                 exception_request=exception_request,
                 sent_to=None,

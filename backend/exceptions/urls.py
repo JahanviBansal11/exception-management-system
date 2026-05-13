@@ -13,6 +13,7 @@ from .views import (
     NotificationUnreadCountView,
     NotificationMarkReadView,
     NotificationMarkAllReadView,
+    WsTicketView,
 )
 
 router = DefaultRouter()
@@ -30,4 +31,5 @@ urlpatterns = router.urls + [
     path('notifications/unread-count/', NotificationUnreadCountView.as_view(), name='notifications_unread_count'),
     path('notifications/mark-all-read/', NotificationMarkAllReadView.as_view(), name='notifications_mark_all_read'),
     path('notifications/<int:pk>/read/', NotificationMarkReadView.as_view(), name='notification_mark_read'),
+    path('ws-ticket/', WsTicketView.as_view(), name='ws_ticket'),
 ]

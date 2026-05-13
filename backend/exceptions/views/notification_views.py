@@ -1,3 +1,7 @@
+import uuid
+
+from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -49,3 +53,25 @@ class NotificationMarkAllReadView(APIView):
             recipient=request.user, is_read=False
         ).update(is_read=True, read_at=timezone.now())
         return Response({'marked_read': updated})
+
+
+class WsTicketView(APIView):
+    """
+    Issue a short-lived, one-time WebSocket connection ticket.
+
+    The frontend calls this endpoint (authenticated via the normal JWT Bearer
+    header) and receives a UUID ticket.  It then opens the WebSocket with
+    ?ticket=<uuid> instead of passing the long-lived JWT in the URL.
+
+    Why: JWT tokens in query strings appear in plain-text server logs and
+    browser history.  A ticket has a 30-second TTL and is deleted the moment
+    the WebSocket handshake consumes it, so a leaked URL becomes useless
+    almost immediately.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ticket = str(uuid.uuid4())
+        ttl = getattr(settings, 'WS_TICKET_TTL', 30)
+        cache.set(f'ws_ticket_{ticket}', request.user.id, timeout=ttl)
+        return Response({'ticket': ticket})

@@ -96,7 +96,7 @@ class ReminderLog(models.Model):
     """Delivery tracking for all reminder and notification emails."""
 
     CHANNEL_CHOICES = [
-        ('email', 'Email'),
+        ('email',  'Email'),
         ('system', 'System Log'),
     ]
 
@@ -125,6 +125,20 @@ class ReminderLog(models.Model):
         ordering = ['-sent_at']
         indexes = [
             models.Index(fields=['exception_request', 'sent_at']),
+            models.Index(
+                fields=['exception_request', 'sent_to', 'reminder_type', 'delivery_status'],
+                name='reminderlog_dedup_idx',
+            ),
+        ]
+        constraints = [
+            # Prevents two concurrent Celery Beat workers from sending the same
+            # reminder twice.  Only one "sent" row per (exception, recipient, type)
+            # is allowed; failed/bounced rows are not constrained.
+            models.UniqueConstraint(
+                fields=['exception_request', 'sent_to', 'reminder_type'],
+                condition=models.Q(delivery_status='sent'),
+                name='reminderlog_unique_sent',
+            )
         ]
 
     def __str__(self):

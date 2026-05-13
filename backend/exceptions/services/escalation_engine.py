@@ -42,8 +42,9 @@ class EscalationEngine:
 
         for exception in expired_qs:
             try:
+                previous_status = exception.status
                 WorkflowService.mark_expired(exception, user)
-                NotificationService.send_approval_expired_notification(exception)
+                NotificationService.send_approval_expired_notification(exception, previous_status)
                 count += 1
                 logger.warning(
                     "Approval deadline passed for exception #%s (deadline was %s)",
@@ -79,6 +80,18 @@ class EscalationEngine:
             try:
                 WorkflowService.mark_active_expired(exception, user)
                 NotificationService.send_exception_expired_notification(exception)
+                recipients = [r for r in [exception.requested_by, exception.risk_owner] if r]
+                NotificationService.notify(
+                    recipients=recipients,
+                    exception=exception,
+                    notification_type='exception_expired',
+                    severity='danger',
+                    title='Exception expired — action required',
+                    message=(
+                        f'Exception #{exception.id} has passed its end date. '
+                        f'You have 14 days to extend or remediate before escalation.'
+                    ),
+                )
                 count += 1
                 logger.warning(
                     "Exception #%s expired (end date was %s)",
@@ -129,6 +142,25 @@ class EscalationEngine:
                     delivery_status="sent" if sent else "failed",
                     message_content=f"Overdue expired notification for exception #{exception.id}",
                 )
+
+                is_urgent = exception.risk_rating in {"High", "Critical"}
+                severity = "danger" if is_urgent else "warning"
+                prefix = "URGENT — " if is_urgent else ""
+                risk_owner = exception.risk_owner
+                if risk_owner:
+                    NotificationService.notify(
+                        recipients=[risk_owner],
+                        exception=exception,
+                        notification_type="overdue_expired",
+                        severity=severity,
+                        title=f"{prefix}Unresolved expired exception — no action in 14 days",
+                        message=(
+                            f"Exception #{exception.id} ({exception.risk_rating} risk) expired over "
+                            f"14 days ago with no extension or remediation submitted."
+                        ),
+                        email_queued=sent,
+                    )
+
                 if sent:
                     count += 1
                     logger.warning(

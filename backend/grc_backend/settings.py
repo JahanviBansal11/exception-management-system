@@ -6,6 +6,7 @@ import os
 import environ
 from pathlib import Path
 from datetime import timedelta
+from celery.schedules import crontab
 
 # 1. Initialize environ
 env = environ.Env(
@@ -49,7 +50,20 @@ CHANNEL_LAYERS = {
     },
 }
 
+# Django cache backed by Redis so WS tickets are visible across all processes.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': env('REDIS_URL', default='redis://localhost:6379/1'),
+    }
+}
+
+# How long (seconds) a WS connection ticket remains valid after issue.
+# Tickets are one-time-use so a legitimate connect consumes it immediately.
+WS_TICKET_TTL = 30
+
 MIDDLEWARE = [
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # Added for Frontend connection
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -153,6 +167,35 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
+
+# Periodic task schedule (consumed by Celery Beat — has no effect when
+# CELERY_TASK_ALWAYS_EAGER=True, which is used in local development only).
+CELERY_BEAT_SCHEDULE = {
+    'evaluate-pending-approvals': {
+        'task': 'exceptions.tasks.evaluate_pending_approvals',
+        'schedule': crontab(minute='*/5'),           # every 5 min
+    },
+    'evaluate-active-exceptions': {
+        'task': 'exceptions.tasks.evaluate_active_exceptions',
+        'schedule': crontab(minute='*/10'),           # every 10 min
+    },
+    'escalate-expired-approvals': {
+        'task': 'exceptions.tasks.escalate_expired_approvals',
+        'schedule': crontab(minute=0),               # every hour
+    },
+    'expire-active-exceptions': {
+        'task': 'exceptions.tasks.expire_active_exceptions',
+        'schedule': crontab(minute=0),               # every hour
+    },
+    'notify-unresolved-expired': {
+        'task': 'exceptions.tasks.notify_unresolved_expired_exceptions',
+        'schedule': crontab(minute=0),               # every hour
+    },
+    'purge-old-notifications': {
+        'task': 'exceptions.tasks.purge_old_notifications',
+        'schedule': crontab(hour=2, minute=0),        # daily at 02:00 UTC
+    },
+}
 
 # ============================================
 # EMAIL CONFIGURATION
