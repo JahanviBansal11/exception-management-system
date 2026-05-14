@@ -473,6 +473,36 @@ class WorkflowService:
         )
 
     @staticmethod
+    def resubmit(exception_request, user, new_exception_id=None):
+        """
+        ApprovalDeadlinePassed: record a resubmission in the audit log without
+        changing the parent status.  The new Draft is linked via parent_exception.
+        Parent remains ApprovalDeadlinePassed so the history is fully traceable.
+        """
+        if exception_request.status != "ApprovalDeadlinePassed":
+            raise ValueError("Only ApprovalDeadlinePassed exceptions can be resubmitted.")
+
+        from exceptions.models import AuditLog
+
+        details = {"message": "New draft created after approval deadline passed."}
+        if new_exception_id is not None:
+            details["new_exception_id"] = new_exception_id
+
+        AuditLog.objects.create(
+            exception_request=exception_request,
+            action_type="RESUBMIT",
+            previous_status=exception_request.status,
+            new_status=exception_request.status,
+            performed_by=user,
+            details=details,
+        )
+
+        logger.info(
+            "Exception #%s resubmitted by %s — new draft #%s",
+            exception_request.id, user.username if user else "system", new_exception_id,
+        )
+
+    @staticmethod
     def mark_extended(exception_request, user, related_version=None, new_exception_id=None):
         """
         Approved | Expired → Extended. Called when an extension request supersedes this exception.

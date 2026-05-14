@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../services/apiClient'
 
-const WS_BASE = 'ws://127.0.0.1:8000'
+const WS_BASE = import.meta.env.VITE_WS_BASE ?? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8000`
 const MAX_BACKOFF_MS = 30_000
 
 export function useNotifications(user) {

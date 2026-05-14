@@ -26,6 +26,7 @@ const ACTION_LABELS = {
   EXPIRE: 'Deadline Passed',
   MODIFY: 'Modified',
   EXTEND: 'Extended',
+  RESUBMIT: 'Resubmitted',
   REMIND: 'Reminder Sent',
   ESCALATE: 'Escalated',
   UPDATE: 'Updated',

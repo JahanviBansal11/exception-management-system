@@ -207,6 +207,25 @@ class ExceptionRequestViewSet(viewsets.ModelViewSet):
             raise ValidationError(str(e))
 
     @action(detail=True, methods=["post"])
+    def resubmit(self, request, pk=None):
+        """ApprovalDeadlinePassed → new Draft (resubmission). Parent status unchanged."""
+        old = self.get_object()
+        if old.requested_by != request.user and not request.user.groups.filter(name=SECURITY_GROUP_NAME).exists():
+            raise PermissionDenied("Only the original requestor or Security team can resubmit.")
+        if old.status != "ApprovalDeadlinePassed":
+            raise ValidationError({"detail": "Resubmit is only available for exceptions where the approval deadline has passed."})
+        try:
+            with transaction.atomic():
+                new_exc = self._copy_exception(old)
+                WorkflowService.resubmit(old, request.user, new_exception_id=new_exc.id)
+            return Response({
+                "message": "Resubmission draft created. Edit and submit the new draft.",
+                "new_exception_id": new_exc.id,
+            })
+        except ValueError as e:
+            raise ValidationError(str(e))
+
+    @action(detail=True, methods=["post"])
     def modify(self, request, pk=None):
         """Rejected → Modified + create new fully-editable Draft (modification)."""
         old = self.get_object()

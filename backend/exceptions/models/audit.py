@@ -15,6 +15,7 @@ class AuditLog(models.Model):
         ("EXPIRE", "Expired"),
         ("MODIFY", "Superseded by Modification"),
         ("EXTEND", "Superseded by Extension"),
+        ("RESUBMIT", "Resubmitted after Approval Deadline Passed"),
         ("REMIND", "Reminder Sent"),
         ("ESCALATE", "Escalated"),
         ("UPDATE", "Updated"),

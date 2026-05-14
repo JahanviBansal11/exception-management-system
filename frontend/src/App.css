@@ -50,6 +50,16 @@
   background: var(--primary);
   color: var(--primary-contrast);
   cursor: pointer;
+  transition: opacity 0.1s, transform 0.08s, background-color 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+  opacity: 0.8;
 }
 
 .btn:disabled {
@@ -274,6 +284,15 @@
 
 .list-card {
   cursor: pointer;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+
+.list-card:hover:not(.list-card-active) {
+  border-color: #a1a1aa;
+}
+
+.list-card:active {
+  transform: scale(0.99);
 }
 
 .list-card-active {

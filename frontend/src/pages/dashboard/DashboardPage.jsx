@@ -21,6 +21,15 @@ const ACTION_CONFIG = {
   close: { endpoint: 'close', label: 'Close', allowedStatuses: ['Approved'] },
 }
 
+const STATUS_TRANSITIONS = {
+  submit: 'Submitted',
+  bu_approve: 'AwaitingRiskOwner',
+  bu_reject: 'Rejected',
+  risk_assess: 'Approved',
+  risk_reject: 'Rejected',
+  close: 'Closed',
+}
+
 const ACTIONS_USING_NOTES = new Set(['bu_approve', 'bu_reject', 'risk_assess', 'risk_reject'])
 
 function actionUsesNotes(actionKey) {
@@ -106,6 +115,7 @@ const AUDIT_ACTION_LABELS = {
   CLOSE: 'Closed',
   MODIFY: 'Modified',
   EXTEND: 'Extended',
+  RESUBMIT: 'Resubmitted',
   REMIND: 'Reminder Sent',
   ESCALATE: 'Escalated',
   UPDATE: 'Updated',
@@ -274,6 +284,8 @@ function DashboardPage({ view }) {
   const [remediateNotes, setRemediateNotes] = useState('')
   const [modifyLoading, setModifyLoading] = useState(false)
   const [modifyError, setModifyError] = useState('')
+  const [resubmitLoading, setResubmitLoading] = useState(false)
+  const [resubmitError, setResubmitError] = useState('')
   const [closeRejectedLoading, setCloseRejectedLoading] = useState(false)
   const [closeRejectedError, setCloseRejectedError] = useState('')
   const [deleteDraftLoading, setDeleteDraftLoading] = useState(false)
@@ -453,6 +465,7 @@ function DashboardPage({ view }) {
     setRemediateError('')
     setRemediateNotes('')
     setModifyError('')
+    setResubmitError('')
     setCloseRejectedError('')
     setDeleteDraftError('')
 
@@ -532,31 +545,42 @@ function DashboardPage({ view }) {
     if (!selected) return
 
     setActionError('')
-    try {
-      const config = ACTION_CONFIG[actionKey]
-      const notes = selectedActionNotes.trim()
-      const requiresNotes = actionRequiresNotes(actionKey, selected)
 
-      if (requiresNotes && !notes) {
-        if (actionKey === 'bu_approve') {
-          setActionError('Notes are mandatory for High/Critical BU approval.')
-        } else {
-          setActionError('Feedback is mandatory for rejection.')
-        }
-        return
+    const config = ACTION_CONFIG[actionKey]
+    const notes = selectedActionNotes.trim()
+    const requiresNotes = actionRequiresNotes(actionKey, selected)
+
+    if (requiresNotes && !notes) {
+      if (actionKey === 'bu_approve') {
+        setActionError('Notes are mandatory for High/Critical BU approval.')
+      } else {
+        setActionError('Feedback is mandatory for rejection.')
       }
+      return
+    }
 
+    // Optimistic update — show new status before the round-trip completes
+    const prevSelected = selected
+    const prevItems = items
+    const nextStatus = STATUS_TRANSITIONS[actionKey]
+    if (nextStatus) {
+      setSelected(s => ({ ...s, status: nextStatus }))
+      setItems(list => list.map(item => item.id === selected.id ? { ...item, status: nextStatus } : item))
+    }
+
+    try {
       await api.post(`/api/exceptions/${selected.id}/${config.endpoint}/`, { notes })
-      await loadExceptions()
-      await loadExceptionDetail(selected.id)
-      await loadSummary()
-      await loadNotifications()
+      // Reconcile with server in background — UI already shows the new state
+      Promise.all([loadExceptions(), loadExceptionDetail(selected.id), loadSummary(), loadNotifications()])
       setActionNotesDrafts((current) => {
         const next = { ...current }
         delete next[selected.id]
         return next
       })
     } catch (error) {
+      // Revert optimistic update on failure
+      setSelected(prevSelected)
+      setItems(prevItems)
       const status = error?.response?.status
       if (status === 404) {
         setActionError('This exception is no longer visible to your account.')
@@ -589,17 +613,21 @@ function DashboardPage({ view }) {
     }
 
     setUpdatingEndDate(true)
+    const isoEndDate = new Date(selectedEndDateInput).toISOString()
+
+    // Optimistic update
+    const prevSelected = selected
+    const prevItems = items
+    setSelected(s => ({ ...s, exception_end_date: isoEndDate }))
+    setItems(list => list.map(item => item.id === selected.id ? { ...item, exception_end_date: isoEndDate } : item))
+    setShowEndDateEditor(false)
+
     try {
-      const isoEndDate = new Date(selectedEndDateInput).toISOString()
       await api.post(`/api/exceptions/${selected.id}/update_end_date/`, {
         exception_end_date: isoEndDate,
         notes: selectedEndDateNotes.trim(),
       })
-
-      await loadExceptions()
-      await loadExceptionDetail(selected.id)
-      await loadSummary()
-      await loadNotifications()
+      Promise.all([loadExceptions(), loadExceptionDetail(selected.id), loadSummary(), loadNotifications()])
       setEndDateInputDrafts((current) => {
         const next = { ...current }
         delete next[selected.id]
@@ -610,8 +638,10 @@ function DashboardPage({ view }) {
         delete next[selected.id]
         return next
       })
-      setShowEndDateEditor(false)
     } catch (error) {
+      setSelected(prevSelected)
+      setItems(prevItems)
+      setShowEndDateEditor(true)
       const detail = error?.response?.data
       if (typeof detail?.detail === 'string') {
         setEndDateUpdateError(detail.detail)
@@ -623,6 +653,27 @@ function DashboardPage({ view }) {
       }
     } finally {
       setUpdatingEndDate(false)
+    }
+  }
+
+  async function requestResubmit() {
+    if (!selected) return
+    setResubmitError('')
+    setResubmitLoading(true)
+    try {
+      const response = await api.post(`/api/exceptions/${selected.id}/resubmit/`, {})
+      const newId = response.data.new_exception_id
+      navigate(`/exceptions/${newId}/edit`)
+    } catch (error) {
+      const s = error?.response?.status
+      if (s === 403) {
+        setResubmitError('You do not have permission to resubmit.')
+      } else if (s === 400) {
+        setResubmitError(error?.response?.data?.detail || 'Could not create resubmission.')
+      } else {
+        setResubmitError('Failed to create resubmission. Please try again.')
+      }
+      setResubmitLoading(false)
     }
   }
 
@@ -680,14 +731,23 @@ function DashboardPage({ view }) {
     if (!window.confirm('Remediate and permanently close this exception? This cannot be undone.')) return
     setRemediateError('')
     setRemediateLoading(true)
+
+    // Optimistic update — remove from list immediately
+    const prevItems = items
+    const prevSelected = selected
+    const closedId = selected.id
+    setItems(list => list.filter(item => item.id !== closedId))
+    setSelectedId(null)
+    setSelected(null)
+
     try {
-      await api.post(`/api/exceptions/${selected.id}/remediate/`, { notes })
-      await loadExceptions()
-      await loadExceptionDetail(selected.id)
-      await loadSummary()
-      await loadNotifications()
+      await api.post(`/api/exceptions/${closedId}/remediate/`, { notes })
+      Promise.all([loadExceptions(), loadSummary(), loadNotifications()])
       setRemediateNotes('')
     } catch (error) {
+      setItems(prevItems)
+      setSelectedId(closedId)
+      setSelected(prevSelected)
       const s = error?.response?.status
       if (s === 403) {
         setRemediateError('You do not have permission to remediate this exception.')
@@ -712,15 +772,23 @@ function DashboardPage({ view }) {
     if (!selected) return
     if (!window.confirm('Permanently close this rejected exception? This cannot be undone.')) return
     setCloseRejectedError('')
-
     setCloseRejectedLoading(true)
+
+    // Optimistic update — remove from list immediately
+    const prevItems = items
+    const prevSelected = selected
+    const closedId = selected.id
+    setItems(list => list.filter(item => item.id !== closedId))
+    setSelectedId(null)
+    setSelected(null)
+
     try {
-      await api.post(`/api/exceptions/${selected.id}/close_rejected/`, {})
-      await loadExceptions()
-      await loadExceptionDetail(selected.id)
-      await loadSummary()
-      await loadNotifications()
+      await api.post(`/api/exceptions/${closedId}/close_rejected/`, {})
+      Promise.all([loadExceptions(), loadSummary(), loadNotifications()])
     } catch (error) {
+      setItems(prevItems)
+      setSelectedId(closedId)
+      setSelected(prevSelected)
       const s = error?.response?.status
       if (s === 403) {
         setCloseRejectedError('You do not have permission to close this exception.')
@@ -737,13 +805,22 @@ function DashboardPage({ view }) {
     if (!window.confirm('Permanently delete this draft? This cannot be undone.')) return
     setDeleteDraftError('')
     setDeleteDraftLoading(true)
+
+    // Optimistic update — remove from list immediately
+    const prevItems = items
+    const prevSelected = selected
+    const deletedId = selected.id
+    setItems(list => list.filter(item => item.id !== deletedId))
+    setSelectedId(null)
+    setSelected(null)
+
     try {
-      await api.delete(`/api/exceptions/${selected.id}/`)
-      await loadExceptions()
-      setSelectedId(null)
-      setSelected(null)
-      await loadSummary()
+      await api.delete(`/api/exceptions/${deletedId}/`)
+      Promise.all([loadExceptions(), loadSummary()])
     } catch (error) {
+      setItems(prevItems)
+      setSelectedId(deletedId)
+      setSelected(prevSelected)
       const s = error?.response?.status
       if (s === 403) {
         setDeleteDraftError('You do not have permission to delete this draft.')
@@ -870,6 +947,7 @@ function DashboardPage({ view }) {
   const isSecurity = (user?.groups || []).includes('Security')
   const isRequestor = selected ? Number(user?.id) === Number(selected.requested_by) : false
   const canModify = selected?.status === 'Rejected' && (isRequestor || isSecurity)
+  const canResubmit = selected?.status === 'ApprovalDeadlinePassed' && (isRequestor || isSecurity)
   const canCloseRejected = selected?.status === 'Rejected' && (isRequestor || isSecurity)
   const canRemediate = selected?.status === 'Expired' && (isRequestor || isSecurity)
   const extendWindowInfo = useMemo(() => {
@@ -1437,7 +1515,7 @@ function DashboardPage({ view }) {
                   ) : null}
 
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: showActionNotesBox ? '8px' : 0 }}>
-                    {availableActions.length === 0 && !canModify && !canCloseRejected && !extendWindowInfo && !canEditDraft && !canDeleteDraft && !canRemediate ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
+                    {availableActions.length === 0 && !canModify && !canResubmit && !canCloseRejected && !extendWindowInfo && !canEditDraft && !canDeleteDraft && !canRemediate ? <span className="meta">No actions available for this exception in your current role/state.</span> : null}
                     {availableActions.map(([actionKey, config]) => (
                       <button
                         key={actionKey}
@@ -1449,6 +1527,16 @@ function DashboardPage({ view }) {
                         {actionRequiresNotes(actionKey, selected) ? <span className="error" style={{ display: 'inline', marginLeft: '4px', marginBottom: 0 }}>*</span> : null}
                       </button>
                     ))}
+                    {canResubmit ? (
+                      <button
+                        className="btn"
+                        style={{ width: 'auto' }}
+                        onClick={requestResubmit}
+                        disabled={resubmitLoading}
+                      >
+                        {resubmitLoading ? 'Creating...' : 'Resubmit'}
+                      </button>
+                    ) : null}
                     {canModify ? (
                       <button
                         className="btn"
@@ -1511,6 +1599,7 @@ function DashboardPage({ view }) {
                     ) : null}
                   </div>
                   {actionError ? <div className="error" style={{ marginTop: '8px' }}>{actionError}</div> : null}
+                  {resubmitError ? <div className="error" style={{ marginTop: '8px' }}>{resubmitError}</div> : null}
                   {modifyError ? <div className="error" style={{ marginTop: '8px' }}>{modifyError}</div> : null}
                   {extendError ? <div className="error" style={{ marginTop: '8px' }}>{extendError}</div> : null}
                   {closeRejectedError ? <div className="error" style={{ marginTop: '8px' }}>{closeRejectedError}</div> : null}
@@ -1707,8 +1796,8 @@ function DashboardPage({ view }) {
                     <div style={{ paddingTop: '12px' }}>
                       <div className="meta" style={{ marginBottom: '10px' }}>
                         Full status history for this exception. Security only.
-                        {auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND').length > 0
-                          ? ` · ${auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND').length} superseding request(s) recorded.`
+                        {auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND' || l.action_type === 'RESUBMIT').length > 0
+                          ? ` · ${auditLogs.filter(l => l.action_type === 'MODIFY' || l.action_type === 'EXTEND' || l.action_type === 'RESUBMIT').length} superseding request(s) recorded.`
                           : null}
                       </div>
 
