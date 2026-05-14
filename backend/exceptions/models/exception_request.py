@@ -142,11 +142,11 @@ class ExceptionRequest(models.Model):
         ]
         constraints = [
             models.CheckConstraint(
-                check=models.Q(number_of_assets__gte=1),
+                condition=models.Q(number_of_assets__gte=1),
                 name='exception_number_of_assets_gte_1',
             ),
             models.CheckConstraint(
-                check=models.Q(risk_score__gte=0) | models.Q(risk_score__isnull=True),
+                condition=models.Q(risk_score__gte=0) | models.Q(risk_score__isnull=True),
                 name='exception_risk_score_gte_0_or_null',
             ),
         ]
